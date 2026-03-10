@@ -8,7 +8,7 @@ const char* PluginVersion = "1.0.0-DPLegacy";
 in_addr sunrise_ip = { 174, 136, 231, 17 };
 INT sunrise_port = 8000;
 
-in_addr jd_ip = { 185, 14, 92, 137 };
+in_addr jd_ip = { 192, 168, 50, 228 };
 INT jd_port = 19030;
 
 const char sunrise_description[XTITLE_SERVER_MAX_SERVER_INFO_LEN] = "required,mass_storage,other,ttl,usr,shr,web,dbg,upl,prs,std";
