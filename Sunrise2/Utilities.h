@@ -26,7 +26,7 @@ VOID Sunrise_Print(const CHAR* fmt, ...);
 #ifdef DO_PRINTS
 #define Sunrise_Dbg(x, ...) { do { Sunrise_Print("[Sunrise2] "  x "\n", __VA_ARGS__); } while(0); }
 #else
-#define Sunrise_Dbg
+#define Sunrise_Dbg(...) ((void)0)
 #endif
 
 #pragma region Sunrise2 ini

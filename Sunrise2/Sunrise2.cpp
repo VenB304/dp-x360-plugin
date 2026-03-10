@@ -42,11 +42,9 @@ VOID Initialise()
 {
 	hXam = GetModuleHandle(MODULE_XAM);
 
-	if (MountPath(MOUNT_POINT, GetMountPath()) != 0)
-	{
-		Sunrise_Dbg("Failed to set mount point!");
-		// return; // Don't abort the entire plugin just because INI mounting failed
-	}
+	// Skip INI mount entirely — GetMountPath() can crash if BASE_ADDR doesn't
+	// match the actual load address in an ABadAvatar/XeUnshackle environment.
+	// INI is only used for Halo config and is not needed for Just Dance.
 
 	while (bRunContinuous)
 	{
@@ -54,12 +52,11 @@ VOID Initialise()
 
 		if (TitleID != LastTitleId)
 		{
-			LastTitleId = TitleID; 
+			LastTitleId = TitleID;
 
-			if (TitleID == Halo3 || TitleID == Halo3ExternalBeta || TitleID == Halo3InternalBeta) 
+			if (TitleID == Halo3 || TitleID == Halo3ExternalBeta || TitleID == Halo3InternalBeta)
 			{
 				RegisterActiveServer(sunrise_ip, sunrise_port, sunrise_description);
-				Readini();
 				SetupNetDllHooks();
 				XNotify(L"Halo Sunrise Initialised!");
 			}
@@ -79,14 +76,11 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserve
 	switch (ul_reason_for_call)
 	{
 	case DLL_PROCESS_ATTACH:
-		if (IsTrayOpen())
-		{
-			Sunrise_Dbg("Plugin load aborted! Disc tray is open");
-			// return FALSE; // Ignore tray status to prevent accidental aborts
-		}
-
 		bIsDevkit = FALSE;
-		Sunrise_Dbg("v%s loaded! Running on %s kernel", SunriseVers, bIsDevkit ? "Devkit" : "Retail");
+
+		// Immediate diagnostic — fires before anything else to prove the plugin loaded
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"Sunrise2 Loaded!", NULL);
+
 		ThreadMe((LPTHREAD_START_ROUTINE)Initialise);
 		break;
 	case DLL_PROCESS_DETACH:

@@ -417,7 +417,7 @@
       <AnalyzeStalls>false</AnalyzeStalls>
     </ClCompile>
     <Link>
-      <AdditionalOptions>/ignore:4089 /dll /entry:"_DllMainCRTStartup" /include:"XboxKrnlBuildNumber" %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/ignore:4089 /dll /ALIGN:128,4096 /entry:"_DllMainCRTStartup" /include:"XboxKrnlBuildNumber" %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>libcmt.lib;d3d9.lib;d3dx9.lib;xgraphics.lib;xapilib.lib;xaudio2.lib;x3daudio.lib;xmcore.lib;xboxkrnl.lib;xbdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <OptimizeReferences>true</OptimizeReferences>
@@ -436,8 +436,7 @@
       </Command>
     </PostBuildEvent>
     <ImageXex>
-      <ConfigurationFile>
-      </ConfigurationFile>
+      <ConfigurationFile>xex.xml</ConfigurationFile>
       <AdditionalSections>
       </AdditionalSections>
     </ImageXex>
