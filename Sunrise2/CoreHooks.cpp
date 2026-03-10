@@ -27,20 +27,17 @@ static const char* REDIRECT_DOMAINS[] = {
 };
 static const int REDIRECT_DOMAIN_COUNT = sizeof(REDIRECT_DOMAINS) / sizeof(REDIRECT_DOMAINS[0]);
 
-// Pool of fake XNDNS results for intercepted lookups
-#define MAX_DNS_ENTRIES 8
-static XNDNS fakeDnsResults[MAX_DNS_ENTRIES];
-static int fakeDnsIndex = 0;
+// Local server IP as a string for XHttpConnect hostname replacement
+static const char* LOCAL_SERVER_IP = "192.168.50.228";
 
-// Trampolines for calling original functions after PatchInJump
-// Each trampoline: 16 bytes of saved original code + 16 bytes for jump back = 32 bytes
-// __declspec(align(32)) to ensure proper alignment for PPC code execution
-__declspec(align(32)) static DWORD dnsLookupTrampoline[8];
-__declspec(align(32)) static DWORD dnsReleaseTrampoline[8];
+// ============================================================================
+// XHttp hook — saved original function pointer (no trampoline needed)
+// PatchModuleImport only changes the import table, original code stays intact
+// ============================================================================
 
-// Original function typedef for DNS
-typedef INT (*pfnXNetDnsLookup)(XNCALLER_TYPE xnc, const char* pszHost, WSAEVENT hEvent, XNDNS** ppxndns);
-typedef INT (*pfnXNetDnsRelease)(XNCALLER_TYPE xnc, XNDNS* pxndns);
+// NetDll_XHttpConnect: XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags
+typedef HINTERNET (*pfnNetDll_XHttpConnect)(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags);
+static pfnNetDll_XHttpConnect g_origXHttpConnect = NULL;
 
 static BOOL ShouldRedirectDomain(const char* hostname)
 {
@@ -58,8 +55,17 @@ void RegisterActiveServer(in_addr address, WORD port, const char description[XTI
 	memcpy(activeServer.szServerInfo, description, XTITLE_SERVER_MAX_SERVER_INFO_LEN);
 }
 
+// ============================================================================
+// Import table hooks (PatchModuleImport — game's direct imports only)
+// ============================================================================
+
+static BOOL bConnectHookFired = FALSE;
 int NetDll_connectHook(XNCALLER_TYPE n, SOCKET s, const sockaddr* name, int namelen)
 {
+	if (!bConnectHookFired) {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] connect hook!", NULL);
+		bConnectHookFired = TRUE;
+	}
 	if (n == 1) {
 		((SOCKADDR_IN*)name)->sin_addr.S_un.S_addr = activeServer.inaServer.S_un.S_addr;
 		((SOCKADDR_IN*)name)->sin_port = activeServerPort;
@@ -85,24 +91,34 @@ int NetDll_WSASendToHook(XNCALLER_TYPE xnc, SOCKET s, LPWSABUF lpBuffers, DWORD 
 	return NetDll_WSASendTo(xnc, s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iTolen, lpOverlapped, lpCompletionRoutine);
 }
 
+static BOOL bPrivilegeHookFired = FALSE;
 DWORD XamUserCheckPrivilegeHook(DWORD dwUserIndex, DWORD dwPrivilegeType, PBOOL pfResult)
 {
+	if (!bPrivilegeHookFired) {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Privilege called!", NULL);
+		bPrivilegeHookFired = TRUE;
+	}
 	if (pfResult != NULL) {
 		*pfResult = TRUE;
 	}
 	return 0; // ERROR_SUCCESS
 }
 
+static BOOL bEnumCreateHookFired = FALSE;
 int XamCreateEnumeratorHandleHook(DWORD user_index, HXAMAPP app_id, DWORD open_message, DWORD close_message, DWORD extra_size, DWORD item_count, DWORD flags, PHANDLE out_handle)
 {
-    int result = XamCreateEnumeratorHandle(user_index, app_id, open_message, close_message, extra_size, item_count, flags, out_handle);
+	if (!bEnumCreateHookFired) {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] EnumCreate called!", NULL);
+		bEnumCreateHookFired = TRUE;
+	}
+	int result = XamCreateEnumeratorHandle(user_index, app_id, open_message, close_message, extra_size, item_count, flags, out_handle);
 
-    if (open_message == 0x58039 || ((DWORD)app_id & 0xFFFF0000) == 0x55530000) {
-        lsp_enum_handle = *out_handle;
-        enumeration_index = 0;
-        XNotify(L"LSP intercepted!");
-    }
-    return result;
+	if (open_message == 0x58039 || ((DWORD)app_id & 0xFFFF0000) == 0x55530000) {
+		lsp_enum_handle = *out_handle;
+		enumeration_index = 0;
+		XNotify(L"LSP intercepted!");
+	}
+	return result;
 }
 
 int XamEnumerateHook(HANDLE hEnum, DWORD dwFlags, PDWORD pvBuffer, DWORD cbBuffer, PDWORD pcItemsReturned, PXOVERLAPPED pOverlapped)
@@ -127,12 +143,15 @@ int XamEnumerateHook(HANDLE hEnum, DWORD dwFlags, PDWORD pvBuffer, DWORD cbBuffe
 
 // ============================================================================
 // XNet status hooks — patched directly in xam.xex via PatchInJump
-// These replace the functions entirely so ALL callers get our hooks,
-// not just the game's direct imports.
 // ============================================================================
 
+static BOOL bXnAddrHookFired = FALSE;
 DWORD XNetGetTitleXnAddrHook(XNCALLER_TYPE xnc, XNADDR* pxna)
 {
+	if (!bXnAddrHookFired) {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] XnAddr called!", NULL);
+		bXnAddrHookFired = TRUE;
+	}
 	if (pxna != NULL)
 	{
 		memset(pxna, 0, sizeof(XNADDR));
@@ -155,88 +174,78 @@ DWORD XNetGetTitleXnAddrHook(XNCALLER_TYPE xnc, XNADDR* pxna)
 	return XNET_GET_XNADDR_DHCP | XNET_GET_XNADDR_GATEWAY | XNET_GET_XNADDR_DNS | XNET_GET_XNADDR_ONLINE;
 }
 
+static BOOL bEthLinkHookFired = FALSE;
 DWORD XNetGetEthernetLinkStatusHook(XNCALLER_TYPE xnc)
 {
+	if (!bEthLinkHookFired) {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] EthLink called!", NULL);
+		bEthLinkHookFired = TRUE;
+	}
 	return XNET_ETHERNET_LINK_ACTIVE | XNET_ETHERNET_LINK_100MBPS | XNET_ETHERNET_LINK_FULL_DUPLEX;
-}
-
-// ============================================================================
-// XNet DNS hooks — uses trampolines to call originals for non-Ubisoft domains
-// ============================================================================
-
-INT XNetDnsLookupHook(XNCALLER_TYPE xnc, const char* pszHost, WSAEVENT hEvent, XNDNS** ppxndns)
-{
-	if (pszHost != NULL && ShouldRedirectDomain(pszHost))
-	{
-		XNDNS* pDns = &fakeDnsResults[fakeDnsIndex % MAX_DNS_ENTRIES];
-		fakeDnsIndex++;
-
-		memset(pDns, 0, sizeof(XNDNS));
-		pDns->iStatus = 0;
-		pDns->cina = 1;
-		pDns->aina[0].S_un.S_un_b.s_b1 = 192;
-		pDns->aina[0].S_un.S_un_b.s_b2 = 168;
-		pDns->aina[0].S_un.S_un_b.s_b3 = 50;
-		pDns->aina[0].S_un.S_un_b.s_b4 = 228;
-
-		*ppxndns = pDns;
-
-		if (hEvent != NULL)
-			SetEvent(hEvent);
-
-		XNotify(L"DNS Redirected!");
-		return 0;
-	}
-
-	// Call original via trampoline
-	pfnXNetDnsLookup origFunc = (pfnXNetDnsLookup)(void*)dnsLookupTrampoline;
-	return origFunc(xnc, pszHost, hEvent, ppxndns);
-}
-
-INT XNetDnsReleaseHook(XNCALLER_TYPE xnc, XNDNS* pxndns)
-{
-	for (int i = 0; i < MAX_DNS_ENTRIES; i++)
-	{
-		if (pxndns == &fakeDnsResults[i])
-			return 0;
-	}
-	// Call original via trampoline
-	pfnXNetDnsRelease origFunc = (pfnXNetDnsRelease)(void*)dnsReleaseTrampoline;
-	return origFunc(xnc, pxndns);
 }
 
 // ============================================================================
 // XUserGetSigninState hook — fake Xbox Live sign-in
 // ============================================================================
 
+static BOOL bSigninHookFired = FALSE;
 DWORD XamUserGetSigninStateHook(DWORD dwUserIndex)
 {
-	// Return "signed in to Live" for user 0, not signed in for others
+	if (!bSigninHookFired) {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] SignIn called!", NULL);
+		bSigninHookFired = TRUE;
+	}
 	if (dwUserIndex == 0)
 		return 2; // eXamUserSigninState_SignedInToLive
 	return 0; // eXamUserSigninState_NotSignedIn
 }
 
 // ============================================================================
-// Hook setup — builds trampolines and patches xam.xex functions directly
+// XHttp hooks — intercept HTTP connections at the API level
+// This is what Just Dance actually uses (not XNetDnsLookup)
 // ============================================================================
 
-static void BuildTrampoline(DWORD* trampoline, DWORD* originalFunc)
+static BOOL bXHttpConnectHookFired = FALSE;
+HINTERNET NetDll_XHttpConnectHook(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags)
 {
-	// Copy first 4 instructions (16 bytes) of original function
-	memcpy(trampoline, originalFunc, 16);
-	// Write a jump to originalFunc + 16 (skip the 4 instructions we saved)
-	PatchInJump(&trampoline[4], (DWORD)originalFunc + 16, FALSE);
-	// Flush instruction cache
-	__dcbst(0, trampoline);
-	__sync();
-	__isync();
+	if (!bXHttpConnectHookFired) {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] XHttpConnect!", NULL);
+		bXHttpConnectHookFired = TRUE;
+	}
+
+	if (pszServerName != NULL && ShouldRedirectDomain(pszServerName))
+	{
+		XNotify(L"HTTP Redirected!");
+		if (g_origXHttpConnect != NULL) {
+			// PatchModuleImport path: original function intact, call directly
+			return g_origXHttpConnect(xnc, hSession, LOCAL_SERVER_IP, 80, dwFlags & ~XHTTP_FLAG_SECURE);
+		}
+		// PatchInJump path: can't call original, return NULL (connection will fail gracefully)
+		return NULL;
+	}
+
+	if (g_origXHttpConnect != NULL) {
+		// PatchModuleImport path: pass through to original
+		return g_origXHttpConnect(xnc, hSession, pszServerName, nServerPort, dwFlags);
+	}
+	// PatchInJump path: can't call original for non-Ubisoft domains, return NULL
+	return NULL;
 }
+
+// ============================================================================
+// Hook setup — patches xam.xex functions directly
+// ============================================================================
 
 VOID SetupNetDllHooks()
 {
+	XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] SetupHooks Entry", NULL);
+
 	HMODULE hXam = GetModuleHandle(MODULE_XAM);
-	if (hXam == NULL) return;
+	if (hXam == NULL) {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] hXam is NULL!", NULL);
+		return;
+	}
+	XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] hXam OK", NULL);
 
 	// --- Import table hooks (for game's direct imports) ---
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 12, (DWORD)NetDll_connectHook);
@@ -245,35 +254,59 @@ VOID SetupNetDllHooks()
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 530, (DWORD)XamUserCheckPrivilegeHook);
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 590, (DWORD)XamCreateEnumeratorHandleHook);
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 592, (DWORD)XamEnumerateHook);
+	XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Imports patched", NULL);
 
 	// --- PatchInJump hooks (patches actual xam.xex functions, affects ALL callers) ---
 
 	// XNetGetTitleXnAddr (ordinal 73) — pure replacement, no trampoline needed
 	DWORD* pXNetGetTitleXnAddr = (DWORD*)ResolveFunction(hXam, 73);
-	if (pXNetGetTitleXnAddr != NULL)
+	if (pXNetGetTitleXnAddr != NULL) {
 		PatchInJump(pXNetGetTitleXnAddr, (DWORD)XNetGetTitleXnAddrHook, FALSE);
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord73 XnAddr OK", NULL);
+	} else {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord73 FAILED", NULL);
+	}
 
 	// XNetGetEthernetLinkStatus (ordinal 75) — pure replacement
 	DWORD* pXNetGetEthernetLinkStatus = (DWORD*)ResolveFunction(hXam, 75);
-	if (pXNetGetEthernetLinkStatus != NULL)
+	if (pXNetGetEthernetLinkStatus != NULL) {
 		PatchInJump(pXNetGetEthernetLinkStatus, (DWORD)XNetGetEthernetLinkStatusHook, FALSE);
-
-	// XNetDnsLookup (ordinal 67) — needs trampoline for non-Ubisoft passthrough
-	DWORD* pXNetDnsLookup = (DWORD*)ResolveFunction(hXam, 67);
-	if (pXNetDnsLookup != NULL) {
-		BuildTrampoline(dnsLookupTrampoline, pXNetDnsLookup);
-		PatchInJump(pXNetDnsLookup, (DWORD)XNetDnsLookupHook, FALSE);
-	}
-
-	// XNetDnsRelease (ordinal 68) — needs trampoline for non-fake releases
-	DWORD* pXNetDnsRelease = (DWORD*)ResolveFunction(hXam, 68);
-	if (pXNetDnsRelease != NULL) {
-		BuildTrampoline(dnsReleaseTrampoline, pXNetDnsRelease);
-		PatchInJump(pXNetDnsRelease, (DWORD)XNetDnsReleaseHook, FALSE);
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord75 EthLink OK", NULL);
+	} else {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord75 FAILED", NULL);
 	}
 
 	// XamUserGetSigninState (ordinal 528) — fake Live sign-in
 	DWORD* pXamUserGetSigninState = (DWORD*)ResolveFunction(hXam, 528);
-	if (pXamUserGetSigninState != NULL)
+	if (pXamUserGetSigninState != NULL) {
 		PatchInJump(pXamUserGetSigninState, (DWORD)XamUserGetSigninStateHook, FALSE);
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord528 SignIn OK", NULL);
+	} else {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord528 FAILED", NULL);
+	}
+
+	// --- XHttp hooks — the key hooks for Just Dance's HTTP traffic ---
+	// Using PatchModuleImport (not PatchInJump) so we can call the original
+	// function directly via saved pointer — no trampoline needed.
+
+	// NetDll_XHttpConnect (ordinal 205) — redirect Ubisoft hostnames to local server
+	g_origXHttpConnect = (pfnNetDll_XHttpConnect)ResolveFunction(hXam, 205);
+	if (g_origXHttpConnect != NULL) {
+		DWORD patchResult = PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 205, (DWORD)NetDll_XHttpConnectHook);
+		if (patchResult == S_OK) {
+			XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord205 Import OK", NULL);
+		} else {
+			// PatchModuleImport failed — game may not import ordinal 205 directly.
+			// Fall back to PatchInJump (no trampoline — for Ubisoft domains only,
+			// non-Ubisoft calls will go through the unmodified original code path
+			// since PatchInJump redirects ALL calls to our hook).
+			PatchInJump((DWORD*)g_origXHttpConnect, (DWORD)NetDll_XHttpConnectHook, FALSE);
+			g_origXHttpConnect = NULL; // Can't call original anymore — code is overwritten
+			XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord205 PatchJump", NULL);
+		}
+	} else {
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord205 FAILED", NULL);
+	}
+
+	XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] All hooks done!", NULL);
 }

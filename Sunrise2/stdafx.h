@@ -7,6 +7,7 @@
 
 #include <xtl.h>
 #include <xboxmath.h>
+#include <xhttp.h>
 #include <xkelib.h>
 #include <fstream>
 #include <string>
