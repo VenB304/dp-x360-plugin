@@ -42,7 +42,7 @@ VOID Initialise()
 	if (MountPath(MOUNT_POINT, GetMountPath()) != 0)
 	{
 		Sunrise_Dbg("Failed to set mount point!");
-		return;
+		// return; // Don't abort the entire plugin just because INI mounting failed
 	}
 
 	while (bRunContinuous)
@@ -60,7 +60,7 @@ VOID Initialise()
 				SetupNetDllHooks();
 				XNotify(L"Halo Sunrise Initialised!");
 			}
-			else if (TitleID == JustDance2014 || TitleID == JustDance2015 || TitleID == JustDance2016 || TitleID == JustDance2017 || TitleID == JustDance2018) {
+			else if ((TitleID & 0xFFFF0000) == 0x55530000) {
 				RegisterActiveServer(jd_ip, jd_port, jd_description);
 				SetupNetDllHooks();
 				XNotify(L"DanceParty Enabled!");
@@ -79,7 +79,7 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserve
 		if (IsTrayOpen())
 		{
 			Sunrise_Dbg("Plugin load aborted! Disc tray is open");
-			return FALSE;
+			// return FALSE; // Ignore tray status to prevent accidental aborts
 		}
 
 		bIsDevkit = *(DWORD*)0x8E038610 & 0x8000 ? FALSE : TRUE;
