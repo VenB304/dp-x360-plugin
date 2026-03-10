@@ -31,13 +31,36 @@ static const int REDIRECT_DOMAIN_COUNT = sizeof(REDIRECT_DOMAINS) / sizeof(REDIR
 static const char* LOCAL_SERVER_IP = "192.168.50.228";
 
 // ============================================================================
-// XHttp hook — saved original function pointer (no trampoline needed)
-// PatchModuleImport only changes the import table, original code stays intact
+// XHttp hook — unhook-call-rehook pattern for PatchInJump
+// We save the original 16 bytes before patching. When the hook fires,
+// we restore them, call the original, then re-patch.
 // ============================================================================
 
-// NetDll_XHttpConnect: XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags
 typedef HINTERNET (*pfnNetDll_XHttpConnect)(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags);
-static pfnNetDll_XHttpConnect g_origXHttpConnect = NULL;
+static DWORD* g_pXHttpConnect = NULL;       // Address of the function in xam.xex
+static DWORD g_origXHttpConnectCode[4];     // Saved original 16 bytes
+
+// Forward declaration — defined further below
+HINTERNET NetDll_XHttpConnectHook(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags);
+
+// Temporarily restore original code, call through, re-patch
+static HINTERNET CallOriginalXHttpConnect(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags)
+{
+	// Restore original code
+	memcpy(g_pXHttpConnect, g_origXHttpConnectCode, 16);
+	__dcbst(0, g_pXHttpConnect);
+	__sync();
+	__isync();
+
+	// Call the now-restored original function
+	pfnNetDll_XHttpConnect origFunc = (pfnNetDll_XHttpConnect)(void*)g_pXHttpConnect;
+	HINTERNET result = origFunc(xnc, hSession, pszServerName, nServerPort, dwFlags);
+
+	// Re-apply our hook
+	PatchInJump(g_pXHttpConnect, (DWORD)NetDll_XHttpConnectHook, FALSE);
+
+	return result;
+}
 
 static BOOL ShouldRedirectDomain(const char* hostname)
 {
@@ -202,7 +225,7 @@ DWORD XamUserGetSigninStateHook(DWORD dwUserIndex)
 
 // ============================================================================
 // XHttp hooks — intercept HTTP connections at the API level
-// This is what Just Dance actually uses (not XNetDnsLookup)
+// Uses PatchInJump with unhook-call-rehook to call the original
 // ============================================================================
 
 static BOOL bXHttpConnectHookFired = FALSE;
@@ -216,20 +239,12 @@ HINTERNET NetDll_XHttpConnectHook(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR 
 	if (pszServerName != NULL && ShouldRedirectDomain(pszServerName))
 	{
 		XNotify(L"HTTP Redirected!");
-		if (g_origXHttpConnect != NULL) {
-			// PatchModuleImport path: original function intact, call directly
-			return g_origXHttpConnect(xnc, hSession, LOCAL_SERVER_IP, 80, dwFlags & ~XHTTP_FLAG_SECURE);
-		}
-		// PatchInJump path: can't call original, return NULL (connection will fail gracefully)
-		return NULL;
+		// Redirect to local server IP on port 80 (HTTP), strip secure flag
+		return CallOriginalXHttpConnect(xnc, hSession, LOCAL_SERVER_IP, 80, dwFlags & ~XHTTP_FLAG_SECURE);
 	}
 
-	if (g_origXHttpConnect != NULL) {
-		// PatchModuleImport path: pass through to original
-		return g_origXHttpConnect(xnc, hSession, pszServerName, nServerPort, dwFlags);
-	}
-	// PatchInJump path: can't call original for non-Ubisoft domains, return NULL
-	return NULL;
+	// Non-Ubisoft domain: pass through to original
+	return CallOriginalXHttpConnect(xnc, hSession, pszServerName, nServerPort, dwFlags);
 }
 
 // ============================================================================
@@ -285,25 +300,17 @@ VOID SetupNetDllHooks()
 		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord528 FAILED", NULL);
 	}
 
-	// --- XHttp hooks — the key hooks for Just Dance's HTTP traffic ---
-	// Using PatchModuleImport (not PatchInJump) so we can call the original
-	// function directly via saved pointer — no trampoline needed.
+	// --- XHttp hook — PatchInJump with unhook-call-rehook ---
+	// PatchInJump catches ALL callers (including xam-internal calls).
+	// We save the original code so we can temporarily unhook to call through.
 
 	// NetDll_XHttpConnect (ordinal 205) — redirect Ubisoft hostnames to local server
-	g_origXHttpConnect = (pfnNetDll_XHttpConnect)ResolveFunction(hXam, 205);
-	if (g_origXHttpConnect != NULL) {
-		DWORD patchResult = PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 205, (DWORD)NetDll_XHttpConnectHook);
-		if (patchResult == S_OK) {
-			XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord205 Import OK", NULL);
-		} else {
-			// PatchModuleImport failed — game may not import ordinal 205 directly.
-			// Fall back to PatchInJump (no trampoline — for Ubisoft domains only,
-			// non-Ubisoft calls will go through the unmodified original code path
-			// since PatchInJump redirects ALL calls to our hook).
-			PatchInJump((DWORD*)g_origXHttpConnect, (DWORD)NetDll_XHttpConnectHook, FALSE);
-			g_origXHttpConnect = NULL; // Can't call original anymore — code is overwritten
-			XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord205 PatchJump", NULL);
-		}
+	g_pXHttpConnect = (DWORD*)ResolveFunction(hXam, 205);
+	if (g_pXHttpConnect != NULL) {
+		// Save original 16 bytes BEFORE patching
+		memcpy(g_origXHttpConnectCode, g_pXHttpConnect, 16);
+		PatchInJump(g_pXHttpConnect, (DWORD)NetDll_XHttpConnectHook, FALSE);
+		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord205 Patched!", NULL);
 	} else {
 		XNotifyQueueUI(XNOTIFYUI_TYPE_PREFERRED_REVIEW, XUSER_INDEX_ANY, XNOTIFYUI_PRIORITY_HIGH, L"[DIAG] Ord205 FAILED", NULL);
 	}
