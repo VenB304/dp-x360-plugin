@@ -26,11 +26,14 @@ DWORD Halo3ExternalBeta = 0x4D53880C;
 DWORD Halo3 = 0x4D5307E6;
 DWORD Halo3ODST = 0x4D530877;
 DWORD HaloReach = 0x4D53085B;
-DWORD JustDance2014 = 0x555308B5;
+DWORD JustDance3 = 0x55530888;
+DWORD JustDance4 = 0x555308B5;
+DWORD JustDance2014 = 0x555308C1;
 DWORD JustDance2015 = 0x555308CD;
-DWORD JustDance2016 = 0x555308D6;
-DWORD JustDance2017 = 0x555308D9;
-DWORD JustDance2018 = 0x555308DF;
+DWORD JustDance2016 = 0x555308D3;
+DWORD JustDance2017 = 0x555308D5;
+DWORD JustDance2018 = 0x555308D7;
+DWORD JustDance2019 = 0x555308D9;
 
 BOOL bAllowRetailPlayers = TRUE;
 BOOL bIgnoreTrueskill = FALSE;
@@ -82,7 +85,7 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserve
 			// return FALSE; // Ignore tray status to prevent accidental aborts
 		}
 
-		bIsDevkit = *(DWORD*)0x8E038610 & 0x8000 ? FALSE : TRUE;
+		bIsDevkit = FALSE;
 		Sunrise_Dbg("v%s loaded! Running on %s kernel", SunriseVers, bIsDevkit ? "Devkit" : "Retail");
 		ThreadMe((LPTHREAD_START_ROUTINE)Initialise);
 		break;

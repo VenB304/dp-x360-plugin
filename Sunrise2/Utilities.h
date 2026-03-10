@@ -20,8 +20,8 @@ PCHAR GetMountPath();
 // DO NOT CALL DIRECTLY. USE DEFINE Sunrise_Dbg instead
 VOID Sunrise_Print(const CHAR* fmt, ...);
 
-// Prints are only enabled is DO_PRINTS is defined below
-#define DO_PRINTS // Comment out to disable prints
+// Prints are only enabled if DO_PRINTS is defined below
+// #define DO_PRINTS // Comment out to disable prints
 
 #ifdef DO_PRINTS
 #define Sunrise_Dbg(x, ...) { do { Sunrise_Print("[Sunrise2] "  x "\n", __VA_ARGS__); } while(0); }

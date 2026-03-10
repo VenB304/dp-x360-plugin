@@ -53,8 +53,8 @@ int XamCreateEnumeratorHandleHook(DWORD user_index, HXAMAPP app_id, DWORD open_m
 {
     int result = XamCreateEnumeratorHandle(user_index, app_id, open_message, close_message, extra_size, item_count, flags, out_handle);
     
-    // Intercept for Halo (0x58039) or Just Dance (0x555308CD)
-    if (open_message == 0x58039 || (DWORD)app_id == 0x555308CD) {
+    // Intercept for Halo (0x58039) or any Ubisoft Title ID (0x5553XXXX)
+    if (open_message == 0x58039 || ((DWORD)app_id & 0xFFFF0000) == 0x55530000) {
         lsp_enum_handle = *out_handle;
         enumeration_index = 0;
         XNotify(L"LSP intercepted!");
