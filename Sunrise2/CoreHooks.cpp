@@ -22,6 +22,33 @@ int NetDll_connectHook(XNCALLER_TYPE n, SOCKET s, const sockaddr* name, int name
 	return NetDll_connect(n, s, name, namelen);
 }
 
+int NetDll_sendtoHook(XNCALLER_TYPE xnc, SOCKET s, const VOID* buf, int len, int flags, VOID* to, int tolen)
+{
+	if (xnc == 1 && to != NULL) {
+		((SOCKADDR_IN*)to)->sin_addr.S_un.S_addr = activeServer.inaServer.S_un.S_addr;
+		((SOCKADDR_IN*)to)->sin_port = activeServerPort;
+	}
+	return NetDll_sendto(xnc, s, buf, len, flags, to, tolen);
+}
+
+int NetDll_WSASendToHook(XNCALLER_TYPE xnc, SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount, LPDWORD lpNumberOfBytesSent, DWORD dwFlags, const struct sockaddr FAR* lpTo, int iTolen, LPOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+{
+	if (xnc == 1 && lpTo != NULL) {
+		((SOCKADDR_IN*)lpTo)->sin_addr.S_un.S_addr = activeServer.inaServer.S_un.S_addr;
+		((SOCKADDR_IN*)lpTo)->sin_port = activeServerPort;
+	}
+	return NetDll_WSASendTo(xnc, s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iTolen, lpOverlapped, lpCompletionRoutine);
+}
+
+DWORD XamUserCheckPrivilegeHook(DWORD dwUserIndex, DWORD dwPrivilegeType, PBOOL pfResult)
+{
+	// Force privilege check to return true to bypass Xbox Live Gold requirements
+	if (pfResult != NULL) {
+		*pfResult = TRUE;
+	}
+	return 0; // ERROR_SUCCESS
+}
+
 int XamCreateEnumeratorHandleHook(DWORD user_index, HXAMAPP app_id, DWORD open_message, DWORD close_message, DWORD extra_size, DWORD item_count, DWORD flags, PHANDLE out_handle)
 {
     int result = XamCreateEnumeratorHandle(user_index, app_id, open_message, close_message, extra_size, item_count, flags, out_handle);
@@ -58,6 +85,9 @@ int XamEnumerateHook(HANDLE hEnum, DWORD dwFlags, PDWORD pvBuffer, DWORD cbBuffe
 VOID SetupNetDllHooks()
 {
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 12, (DWORD)NetDll_connectHook);
+	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 24, (DWORD)NetDll_sendtoHook);
+	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 25, (DWORD)NetDll_WSASendToHook);
+	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 530, (DWORD)XamUserCheckPrivilegeHook);
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 590, (DWORD)XamCreateEnumeratorHandleHook);
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 592, (DWORD)XamEnumerateHook);
 }

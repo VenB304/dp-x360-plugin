@@ -26,7 +26,11 @@ DWORD Halo3ExternalBeta = 0x4D53880C;
 DWORD Halo3 = 0x4D5307E6;
 DWORD Halo3ODST = 0x4D530877;
 DWORD HaloReach = 0x4D53085B;
+DWORD JustDance2014 = 0x555308B5;
 DWORD JustDance2015 = 0x555308CD;
+DWORD JustDance2016 = 0x555308D6;
+DWORD JustDance2017 = 0x555308D9;
+DWORD JustDance2018 = 0x555308DF;
 
 BOOL bAllowRetailPlayers = TRUE;
 BOOL bIgnoreTrueskill = FALSE;
@@ -56,7 +60,7 @@ VOID Initialise()
 				SetupNetDllHooks();
 				XNotify(L"Halo Sunrise Initialised!");
 			}
-			else if (TitleID == JustDance2015) {
+			else if (TitleID == JustDance2014 || TitleID == JustDance2015 || TitleID == JustDance2016 || TitleID == JustDance2017 || TitleID == JustDance2018) {
 				RegisterActiveServer(jd_ip, jd_port, jd_description);
 				SetupNetDllHooks();
 				XNotify(L"DanceParty Enabled!");
