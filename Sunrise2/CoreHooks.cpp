@@ -309,6 +309,7 @@ int NetDll_recvfromPIJHook(XNCALLER_TYPE xnc, SOCKET s, char* buf, int len, int 
 typedef HINTERNET (*pfnNetDll_XHttpConnect)(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags);
 
 static BOOL bXHttpConnectHookFired = FALSE;
+static int g_connectCount = 0;
 HINTERNET NetDll_XHttpConnectHook(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags)
 {
 	if (!bXHttpConnectHookFired) {
@@ -319,9 +320,20 @@ HINTERNET NetDll_XHttpConnectHook(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR 
 		TestTCPConnectivity();
 	}
 
+	// Show domain in toast for every connect (truncated to fit)
 	if (pszServerName != NULL) {
+		wchar_t dmsg[48];
+		int dp = 0;
+		const wchar_t* prefix = L"[C] ";
+		while (*prefix && dp < 4) dmsg[dp++] = *prefix++;
+		for (int i = 0; pszServerName[i] && dp < 44; i++)
+			dmsg[dp++] = (wchar_t)pszServerName[i];
+		dmsg[dp] = 0;
+		XNotify(dmsg);
+
 		LogToServer("XHTTP_CONNECT host=%s port=%d flags=0x%08X", pszServerName, nServerPort, dwFlags);
 	}
+	g_connectCount++;
 
 	// Redirect Ubisoft domains to our local server IP.
 	// With the socket hook marking all TITLE sockets as insecure,
@@ -358,10 +370,22 @@ HINTERNET NetDll_XHttpOpenRequestHook(XNCALLER_TYPE xnc, HINTERNET hConnect,
 {
 	if (pwszVerb != NULL && pwszObjectName != NULL) {
 		LogToServer("XHTTP_OPENREQ verb=%s path=%s flags=0x%08X", pwszVerb, pwszObjectName, dwFlags);
+
+		// Show verb+path in toast for every request (truncated to fit)
+		wchar_t rmsg[48];
+		int rp = 0;
+		const wchar_t* rprefix = L"[R] ";
+		while (*rprefix && rp < 4) rmsg[rp++] = *rprefix++;
+		for (int i = 0; pwszVerb[i] && rp < 8; i++)
+			rmsg[rp++] = (wchar_t)pwszVerb[i];
+		rmsg[rp++] = L' ';
+		for (int i = 0; pwszObjectName[i] && rp < 46; i++)
+			rmsg[rp++] = (wchar_t)pwszObjectName[i];
+		rmsg[rp] = 0;
+		XNotify(rmsg);
 	}
 
 	if (!bXHttpOpenReqHookFired) {
-		XNotify(L"[DIAG] XHttpOpenRequest!");
 		bXHttpOpenReqHookFired = TRUE;
 	}
 
