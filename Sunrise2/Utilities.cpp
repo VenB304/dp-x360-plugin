@@ -15,6 +15,9 @@ VOID PatchInJump(DWORD* addr, DWORD dest, BOOL linked) {
 	temp[2] = 0x7D6903A6;
 	temp[3] = linked ? 0x4E800421 : 0x4E800420;
 	memcpy(addr, temp, 0x10);
+	__dcbst(0, addr);
+	__sync();
+	__isync();
 }
 
 DWORD PatchModuleImport(PLDR_DATA_TABLE_ENTRY Module, CHAR* ImportedModuleName, DWORD Ordinal, DWORD PatchAddress) {

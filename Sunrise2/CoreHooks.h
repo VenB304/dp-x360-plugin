@@ -5,7 +5,7 @@
 #include "stdafx.h"
 
 // ============================================================================
-// HOOK_STATE — reusable PatchInJump unhook-call-rehook infrastructure
+// HOOK_STATE — PatchInJump unhook-call-rehook infrastructure
 // ============================================================================
 
 typedef struct _HOOK_STATE {

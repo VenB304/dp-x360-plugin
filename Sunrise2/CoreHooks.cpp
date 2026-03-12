@@ -32,7 +32,15 @@ static const int REDIRECT_DOMAIN_COUNT = sizeof(REDIRECT_DOMAINS) / sizeof(REDIR
 static const char* LOCAL_SERVER_IP = "192.168.50.228";
 
 // ============================================================================
-// HOOK_STATE — reusable unhook-call-rehook helpers
+// HOOK_STATE — unhook-call-rehook helpers
+//
+// NO reentrancy guards.  On Xbox 360's multi-core PowerPC, each core has its
+// own I-cache.  When we unhook (restore original bytes + dcbst/sync/isync),
+// only THIS core's I-cache is flushed.  Another core calling the same function
+// still sees the old I-cache entry (the hook jump) and enters our hook — but
+// that's fine because the unhook writes the same bytes and the rehook is
+// idempotent.  The critical point is we never return a FAILURE value
+// (INVALID_SOCKET, -1) to a legitimate concurrent caller.
 // ============================================================================
 
 VOID HookState_Init(HOOK_STATE* hs, DWORD* pFunc, DWORD hookFn)
@@ -57,14 +65,17 @@ VOID HookState_Rehook(HOOK_STATE* hs)
 	PatchInJump(hs->pFunction, hs->hookTarget, FALSE);
 }
 
-// Hook states for all PatchInJump hooks that need call-through
-static HOOK_STATE g_hookSocket      = {0};  // ordinal 3
-static HOOK_STATE g_hookConnect     = {0};  // ordinal 12
-static HOOK_STATE g_hookSendto      = {0};  // ordinal 24
-static HOOK_STATE g_hookRecvfrom    = {0};  // ordinal 20
-static HOOK_STATE g_hookXHttpConnect = {0}; // ordinal 205
-static HOOK_STATE g_hookXHttpOpenReq = {0}; // ordinal 207
-static HOOK_STATE g_hookXHttpSendReq = {0}; // ordinal 209
+// Hook states for all PatchInJump hooks
+static HOOK_STATE g_hookSocket       = {0};  // ordinal 3
+static HOOK_STATE g_hookConnect      = {0};  // ordinal 12
+static HOOK_STATE g_hookSendto       = {0};  // ordinal 24
+static HOOK_STATE g_hookRecvfrom     = {0};  // ordinal 20
+static HOOK_STATE g_hookXHttpConnect = {0};  // ordinal 205
+static HOOK_STATE g_hookXHttpOpenReq = {0};  // ordinal 207
+static HOOK_STATE g_hookXHttpSendReq = {0};  // ordinal 209
+static HOOK_STATE g_hookXnAddr       = {0};  // ordinal 73
+static HOOK_STATE g_hookEthLink      = {0};  // ordinal 75
+static HOOK_STATE g_hookSigninState  = {0};  // ordinal 528
 
 // ============================================================================
 // Side-channel UDP diagnostic logging
@@ -131,6 +142,12 @@ static void LogPayloadToServer(const char* tag, const void* data, int dataLen)
 // Utility
 // ============================================================================
 
+static BOOL IsJDTitleActive()
+{
+	DWORD tid = XamGetCurrentTitleId();
+	return (tid & 0xFFFF0000) == 0x55530000;
+}
+
 static BOOL ShouldRedirectDomain(const char* hostname)
 {
 	for (int i = 0; i < REDIRECT_DOMAIN_COUNT; i++)
@@ -148,58 +165,49 @@ void RegisterActiveServer(in_addr address, WORD port, const char description[XTI
 }
 
 // ============================================================================
-// PatchInJump socket hooks (system-wide — catches Quazal internal calls)
+// PatchInJump socket hooks (system-wide)
 //
-// IMPORTANT: LogToServer() calls NetDll_sendto internally, so the sendto
-// hook MUST guard against recursion. We use a per-hook volatile guard flag
-// checked at the TOP of each hook — if re-entered, skip straight to the
-// original function without touching HOOK_STATE (which would corrupt the
-// outer call's unhook-rehook sequence).
+// All hooks use unhook-call-rehook.  NO reentrancy guards — returning
+// INVALID_SOCKET or -1 to concurrent system callers caused the hang.
+// The I-cache race on multi-core PPC is benign (each core caches
+// independently; a stale I-cache entry just means one extra pass through
+// the hook, which is harmless).
+//
+// For hooks where LogToServer could recurse (sendto), we check
+// XNCALLER_TYPE first and fast-path non-TITLE callers.
 // ============================================================================
 
-// --- NetDll_socket (ordinal 3) — diagnostic: log all socket creation ---
+// --- NetDll_socket (ordinal 3) ---
 
 typedef SOCKET (*pfnNetDll_socket)(XNCALLER_TYPE xnc, int af, int type, int protocol);
 
 static BOOL bSocketHookFired = FALSE;
-static volatile BOOL g_inSocketHook = FALSE;
 
 SOCKET NetDll_socketPIJHook(XNCALLER_TYPE xnc, int af, int type, int protocol)
 {
-	// Reentrancy guard (same-thread only)
-	if (g_inSocketHook) return INVALID_SOCKET;
-	g_inSocketHook = TRUE;
-
 	HookState_Unhook(&g_hookSocket);
 	SOCKET result = ((pfnNetDll_socket)(void*)g_hookSocket.pFunction)(xnc, af, type, protocol);
 	HookState_Rehook(&g_hookSocket);
 
 	if (xnc == XNCALLER_TITLE) {
 		LogToServer("SOCKET af=%d type=%d proto=%d fd=%d", af, type, protocol, (int)result);
-
 		if (!bSocketHookFired) {
 			XNotify(L"[DIAG] socket() called!");
 			bSocketHookFired = TRUE;
 		}
 	}
 
-	g_inSocketHook = FALSE;
 	return result;
 }
 
-// --- NetDll_connect (ordinal 12) — redirect + log all TCP connections ---
+// --- NetDll_connect (ordinal 12) ---
 
 typedef int (*pfnNetDll_connect)(XNCALLER_TYPE xnc, SOCKET s, const sockaddr* name, int namelen);
 
 static BOOL bConnectHookFired = FALSE;
-static volatile BOOL g_inConnectHook = FALSE;
 
 int NetDll_connectPIJHook(XNCALLER_TYPE xnc, SOCKET s, const sockaddr* name, int namelen)
 {
-	if (g_inConnectHook) return -1;
-	g_inConnectHook = TRUE;
-
-	// Redirect destination IP before calling original
 	if (xnc == XNCALLER_TITLE && name != NULL && namelen >= (int)sizeof(SOCKADDR_IN)) {
 		SOCKADDR_IN* addr = (SOCKADDR_IN*)name;
 		LogToServer("CONNECT fd=%d ip=%d.%d.%d.%d port=%d",
@@ -221,87 +229,69 @@ int NetDll_connectPIJHook(XNCALLER_TYPE xnc, SOCKET s, const sockaddr* name, int
 	HookState_Unhook(&g_hookConnect);
 	int result = ((pfnNetDll_connect)(void*)g_hookConnect.pFunction)(xnc, s, name, namelen);
 	HookState_Rehook(&g_hookConnect);
-
-	g_inConnectHook = FALSE;
 	return result;
 }
 
-// --- NetDll_sendto (ordinal 24) — redirect + log UDP packets (PRUDP) ---
+// --- NetDll_sendto (ordinal 24) ---
+//
+// LogToServer() calls NetDll_sendto with XNCALLER_SYSAPP.  When the hook is
+// entered with SYSAPP, we skip logging and just call-through.  After unhook,
+// LogToServer's sendto call hits the ORIGINAL function directly (hook bytes
+// removed on this core's I-cache), so there is no infinite recursion.
 
 typedef int (*pfnNetDll_sendto)(XNCALLER_TYPE xnc, SOCKET s, const VOID* buf, int len, int flags, VOID* to, int tolen);
 
 static BOOL bSendtoHookFired = FALSE;
-static volatile BOOL g_inSendtoHook = FALSE;
 
 int NetDll_sendtoPIJHook(XNCALLER_TYPE xnc, SOCKET s, const VOID* buf, int len, int flags, VOID* to, int tolen)
 {
-	// CRITICAL: LogToServer() calls NetDll_sendto — must guard against recursion.
-	// If re-entered, the original function bytes are restored (we're inside the
-	// unhook'd window), so we can safely call through pFunction.
-	if (g_inSendtoHook) {
-		// Recursive call (from LogToServer during unhook'd window).
-		// Original bytes are restored, safe to call through.
-		return ((pfnNetDll_sendto)(void*)g_hookSendto.pFunction)(xnc, s, buf, len, flags, to, tolen);
-	}
-	g_inSendtoHook = TRUE;
-
-	// Capture original destination for logging before we modify it
-	BYTE origIp[4] = {0};
-	WORD origPort = 0;
-	BOOL isTitleCall = (xnc == XNCALLER_TITLE && to != NULL);
-
-	if (isTitleCall) {
-		SOCKADDR_IN* addr = (SOCKADDR_IN*)to;
-		origIp[0] = addr->sin_addr.S_un.S_un_b.s_b1;
-		origIp[1] = addr->sin_addr.S_un.S_un_b.s_b2;
-		origIp[2] = addr->sin_addr.S_un.S_un_b.s_b3;
-		origIp[3] = addr->sin_addr.S_un.S_un_b.s_b4;
-		origPort = ntohs(addr->sin_port);
-
-		// Redirect destination to our server
-		addr->sin_addr.S_un.S_addr = activeServer.inaServer.S_un.S_addr;
-		addr->sin_port = htons(19030);
+	// Fast path for non-game callers (system services, our own LogToServer)
+	if (xnc != XNCALLER_TITLE || to == NULL) {
+		HookState_Unhook(&g_hookSendto);
+		int result = ((pfnNetDll_sendto)(void*)g_hookSendto.pFunction)(xnc, s, buf, len, flags, to, tolen);
+		HookState_Rehook(&g_hookSendto);
+		return result;
 	}
 
-	// Unhook first, then log (so LogToServer's recursive sendto hits
-	// the original function directly), then call original, then rehook.
+	// Game traffic — capture original destination for logging, then redirect
+	SOCKADDR_IN* addr = (SOCKADDR_IN*)to;
+	BYTE origIp[4];
+	origIp[0] = addr->sin_addr.S_un.S_un_b.s_b1;
+	origIp[1] = addr->sin_addr.S_un.S_un_b.s_b2;
+	origIp[2] = addr->sin_addr.S_un.S_un_b.s_b3;
+	origIp[3] = addr->sin_addr.S_un.S_un_b.s_b4;
+	WORD origPort = ntohs(addr->sin_port);
+
+	addr->sin_addr.S_un.S_addr = activeServer.inaServer.S_un.S_addr;
+	addr->sin_port = htons(19030);
+
+	// Unhook FIRST, then log.  LogToServer -> sendto hits the original
+	// function directly (hook bytes removed on this core).
 	HookState_Unhook(&g_hookSendto);
 
-	// Log DURING the unhook'd window — LogToServer()->NetDll_sendto() will
-	// re-enter this hook, hit the reentrancy guard, and call the original
-	// function (whose bytes are currently restored).
-	if (isTitleCall) {
-		LogToServer("SENDTO fd=%d ip=%d.%d.%d.%d port=%d len=%d",
-			(int)s, origIp[0], origIp[1], origIp[2], origIp[3], origPort, len);
+	LogToServer("SENDTO fd=%d ip=%d.%d.%d.%d port=%d len=%d",
+		(int)s, origIp[0], origIp[1], origIp[2], origIp[3], origPort, len);
 
-		if (buf != NULL && len > 0) {
-			LogPayloadToServer("SENDTO_DATA", buf, len);
-		}
+	if (buf != NULL && len > 0) {
+		LogPayloadToServer("SENDTO_DATA", buf, len);
+	}
 
-		if (!bSendtoHookFired) {
-			XNotify(L"[DIAG] sendto() called!");
-			bSendtoHookFired = TRUE;
-		}
+	if (!bSendtoHookFired) {
+		XNotify(L"[DIAG] sendto() called!");
+		bSendtoHookFired = TRUE;
 	}
 
 	int result = ((pfnNetDll_sendto)(void*)g_hookSendto.pFunction)(xnc, s, buf, len, flags, to, tolen);
 	HookState_Rehook(&g_hookSendto);
-
-	g_inSendtoHook = FALSE;
 	return result;
 }
 
-// --- NetDll_recvfrom (ordinal 20) — log incoming UDP data ---
+// --- NetDll_recvfrom (ordinal 20) ---
 
 typedef int (*pfnNetDll_recvfrom)(XNCALLER_TYPE xnc, SOCKET s, char* buf, int len, int flags, struct sockaddr* from, int* fromlen);
 
-static volatile BOOL g_inRecvfromHook = FALSE;
-
 int NetDll_recvfromPIJHook(XNCALLER_TYPE xnc, SOCKET s, char* buf, int len, int flags, struct sockaddr* from, int* fromlen)
 {
-	if (g_inRecvfromHook) return -1;
-	g_inRecvfromHook = TRUE;
-
 	HookState_Unhook(&g_hookRecvfrom);
 	int result = ((pfnNetDll_recvfrom)(void*)g_hookRecvfrom.pFunction)(xnc, s, buf, len, flags, from, fromlen);
 	HookState_Rehook(&g_hookRecvfrom);
@@ -311,7 +301,6 @@ int NetDll_recvfromPIJHook(XNCALLER_TYPE xnc, SOCKET s, char* buf, int len, int 
 		LogPayloadToServer("RECVFROM_DATA", buf, result);
 	}
 
-	g_inRecvfromHook = FALSE;
 	return result;
 }
 
@@ -319,7 +308,7 @@ int NetDll_recvfromPIJHook(XNCALLER_TYPE xnc, SOCKET s, char* buf, int len, int 
 // XHttp hooks — PatchInJump with unhook-call-rehook (system-wide)
 // ============================================================================
 
-// --- NetDll_XHttpConnect (ordinal 205) — redirect Ubisoft domains ---
+// --- NetDll_XHttpConnect (ordinal 205) ---
 
 typedef HINTERNET (*pfnNetDll_XHttpConnect)(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR pszServerName, INTERNET_PORT nServerPort, DWORD dwFlags);
 
@@ -354,7 +343,7 @@ HINTERNET NetDll_XHttpConnectHook(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR 
 	return result;
 }
 
-// --- NetDll_XHttpOpenRequest (ordinal 207) — log HTTP verbs + paths ---
+// --- NetDll_XHttpOpenRequest (ordinal 207) ---
 
 typedef HINTERNET (*pfnNetDll_XHttpOpenRequest)(XNCALLER_TYPE xnc, HINTERNET hConnect,
 	LPCSTR pwszVerb, LPCSTR pwszObjectName, LPCSTR pwszVersion,
@@ -374,7 +363,6 @@ HINTERNET NetDll_XHttpOpenRequestHook(XNCALLER_TYPE xnc, HINTERNET hConnect,
 		bXHttpOpenReqHookFired = TRUE;
 	}
 
-	// Strip HTTPS flag — our local server is plain HTTP
 	dwFlags &= ~XHTTP_FLAG_SECURE;
 
 	HookState_Unhook(&g_hookXHttpOpenReq);
@@ -385,7 +373,7 @@ HINTERNET NetDll_XHttpOpenRequestHook(XNCALLER_TYPE xnc, HINTERNET hConnect,
 	return result;
 }
 
-// --- NetDll_XHttpSendRequest (ordinal 209) — log request details ---
+// --- NetDll_XHttpSendRequest (ordinal 209) ---
 
 typedef DWORD (*pfnNetDll_XHttpSendRequest)(XNCALLER_TYPE xnc, HINTERNET hRequest,
 	LPCSTR pwszHeaders, DWORD dwHeadersLength, const VOID* lpOptional,
@@ -403,7 +391,6 @@ DWORD NetDll_XHttpSendRequestHook(XNCALLER_TYPE xnc, HINTERNET hRequest,
 
 	LogToServer("XHTTP_SEND hdrs_len=%d body_len=%d total_len=%d", dwHeadersLength, dwOptionalLength, dwTotalLength);
 
-	// Log headers if present (truncated to fit log buffer)
 	if (pwszHeaders != NULL && dwHeadersLength > 0) {
 		int logLen = dwHeadersLength > 400 ? 400 : dwHeadersLength;
 		char hdrBuf[410];
@@ -422,7 +409,6 @@ DWORD NetDll_XHttpSendRequestHook(XNCALLER_TYPE xnc, HINTERNET hRequest,
 
 // ============================================================================
 // Privilege / Enumerator hooks (PatchModuleImport — game imports only)
-// These remain as import-table hooks since they are genuinely game imports
 // ============================================================================
 
 static BOOL bPrivilegeHookFired = FALSE;
@@ -481,8 +467,10 @@ int XamEnumerateHook(HANDLE hEnum, DWORD dwFlags, PDWORD pvBuffer, DWORD cbBuffe
 }
 
 // ============================================================================
-// XNet status hooks — pure replacements via PatchInJump (no call-through)
+// XNet status hooks — call through to original for non-JD titles
 // ============================================================================
+
+typedef DWORD (*pfnXNetGetTitleXnAddr)(XNCALLER_TYPE xnc, XNADDR* pxna);
 
 static BOOL bXnAddrHookFired = FALSE;
 DWORD XNetGetTitleXnAddrHook(XNCALLER_TYPE xnc, XNADDR* pxna)
@@ -491,6 +479,14 @@ DWORD XNetGetTitleXnAddrHook(XNCALLER_TYPE xnc, XNADDR* pxna)
 		XNotify(L"[DIAG] XnAddr called!");
 		bXnAddrHookFired = TRUE;
 	}
+
+	if (!IsJDTitleActive()) {
+		HookState_Unhook(&g_hookXnAddr);
+		DWORD result = ((pfnXNetGetTitleXnAddr)(void*)g_hookXnAddr.pFunction)(xnc, pxna);
+		HookState_Rehook(&g_hookXnAddr);
+		return result;
+	}
+
 	if (pxna != NULL)
 	{
 		memset(pxna, 0, sizeof(XNADDR));
@@ -513,6 +509,8 @@ DWORD XNetGetTitleXnAddrHook(XNCALLER_TYPE xnc, XNADDR* pxna)
 	return XNET_GET_XNADDR_DHCP | XNET_GET_XNADDR_GATEWAY | XNET_GET_XNADDR_DNS | XNET_GET_XNADDR_ONLINE;
 }
 
+typedef DWORD (*pfnXNetGetEthernetLinkStatus)(XNCALLER_TYPE xnc);
+
 static BOOL bEthLinkHookFired = FALSE;
 DWORD XNetGetEthernetLinkStatusHook(XNCALLER_TYPE xnc)
 {
@@ -520,8 +518,18 @@ DWORD XNetGetEthernetLinkStatusHook(XNCALLER_TYPE xnc)
 		XNotify(L"[DIAG] EthLink called!");
 		bEthLinkHookFired = TRUE;
 	}
+
+	if (!IsJDTitleActive()) {
+		HookState_Unhook(&g_hookEthLink);
+		DWORD result = ((pfnXNetGetEthernetLinkStatus)(void*)g_hookEthLink.pFunction)(xnc);
+		HookState_Rehook(&g_hookEthLink);
+		return result;
+	}
+
 	return XNET_ETHERNET_LINK_ACTIVE | XNET_ETHERNET_LINK_100MBPS | XNET_ETHERNET_LINK_FULL_DUPLEX;
 }
+
+typedef DWORD (*pfnXamUserGetSigninState)(DWORD dwUserIndex);
 
 static BOOL bSigninHookFired = FALSE;
 DWORD XamUserGetSigninStateHook(DWORD dwUserIndex)
@@ -530,6 +538,14 @@ DWORD XamUserGetSigninStateHook(DWORD dwUserIndex)
 		XNotify(L"[DIAG] SignIn called!");
 		bSigninHookFired = TRUE;
 	}
+
+	if (!IsJDTitleActive()) {
+		HookState_Unhook(&g_hookSigninState);
+		DWORD result = ((pfnXamUserGetSigninState)(void*)g_hookSigninState.pFunction)(dwUserIndex);
+		HookState_Rehook(&g_hookSigninState);
+		return result;
+	}
+
 	if (dwUserIndex == 0)
 		return 2; // eXamUserSigninState_SignedInToLive
 	return 0; // eXamUserSigninState_NotSignedIn
@@ -558,54 +574,10 @@ VOID SetupNetDllHooks()
 		XNotify(L"[DIAG] LogSocket FAILED");
 	}
 
-	// ---- PatchInJump hooks on socket functions (system-wide) ----
-	// These catch ALL callers including Quazal's internal BerkeleySocketDriver
-
 	DWORD* pAddr;
-
-	// NetDll_socket (ordinal 3) — diagnostic
-	pAddr = (DWORD*)ResolveFunction(hXam, 3);
-	if (pAddr) {
-		HookState_Init(&g_hookSocket, pAddr, (DWORD)NetDll_socketPIJHook);
-		LogToServer("HOOK ord3 socket OK at 0x%08X", (DWORD)pAddr);
-		XNotify(L"[DIAG] Hook ord3 OK");
-	} else {
-		XNotify(L"[DIAG] ord3 resolve FAIL");
-	}
-
-	// NetDll_connect (ordinal 12) — redirect + diagnostic
-	pAddr = (DWORD*)ResolveFunction(hXam, 12);
-	if (pAddr) {
-		HookState_Init(&g_hookConnect, pAddr, (DWORD)NetDll_connectPIJHook);
-		LogToServer("HOOK ord12 connect OK at 0x%08X", (DWORD)pAddr);
-		XNotify(L"[DIAG] Hook ord12 OK");
-	} else {
-		XNotify(L"[DIAG] ord12 resolve FAIL");
-	}
-
-	// NetDll_sendto (ordinal 24) — redirect + packet logging
-	pAddr = (DWORD*)ResolveFunction(hXam, 24);
-	if (pAddr) {
-		HookState_Init(&g_hookSendto, pAddr, (DWORD)NetDll_sendtoPIJHook);
-		LogToServer("HOOK ord24 sendto OK at 0x%08X", (DWORD)pAddr);
-		XNotify(L"[DIAG] Hook ord24 OK");
-	} else {
-		XNotify(L"[DIAG] ord24 resolve FAIL");
-	}
-
-	// NetDll_recvfrom (ordinal 20) — incoming packet logging
-	pAddr = (DWORD*)ResolveFunction(hXam, 20);
-	if (pAddr) {
-		HookState_Init(&g_hookRecvfrom, pAddr, (DWORD)NetDll_recvfromPIJHook);
-		LogToServer("HOOK ord20 recvfrom OK at 0x%08X", (DWORD)pAddr);
-		XNotify(L"[DIAG] Hook ord20 OK");
-	} else {
-		XNotify(L"[DIAG] ord20 resolve FAIL");
-	}
 
 	// ---- PatchInJump hooks on XHttp functions (system-wide) ----
 
-	// NetDll_XHttpConnect (ordinal 205) — domain redirect
 	pAddr = (DWORD*)ResolveFunction(hXam, 205);
 	if (pAddr) {
 		HookState_Init(&g_hookXHttpConnect, pAddr, (DWORD)NetDll_XHttpConnectHook);
@@ -615,7 +587,6 @@ VOID SetupNetDllHooks()
 		XNotify(L"[DIAG] ord205 resolve FAIL");
 	}
 
-	// NetDll_XHttpOpenRequest (ordinal 207) — log HTTP verbs/paths
 	pAddr = (DWORD*)ResolveFunction(hXam, 207);
 	if (pAddr) {
 		HookState_Init(&g_hookXHttpOpenReq, pAddr, (DWORD)NetDll_XHttpOpenRequestHook);
@@ -625,7 +596,6 @@ VOID SetupNetDllHooks()
 		XNotify(L"[DIAG] ord207 resolve FAIL");
 	}
 
-	// NetDll_XHttpSendRequest (ordinal 209) — log request headers/body
 	pAddr = (DWORD*)ResolveFunction(hXam, 209);
 	if (pAddr) {
 		HookState_Init(&g_hookXHttpSendReq, pAddr, (DWORD)NetDll_XHttpSendRequestHook);
@@ -635,30 +605,27 @@ VOID SetupNetDllHooks()
 		XNotify(L"[DIAG] ord209 resolve FAIL");
 	}
 
-	// ---- Pure-replacement PatchInJump hooks (no call-through needed) ----
+	// ---- PatchInJump hooks with title-active gating ----
 
-	// XNetGetTitleXnAddr (ordinal 73)
 	pAddr = (DWORD*)ResolveFunction(hXam, 73);
 	if (pAddr) {
-		PatchInJump(pAddr, (DWORD)XNetGetTitleXnAddrHook, FALSE);
+		HookState_Init(&g_hookXnAddr, pAddr, (DWORD)XNetGetTitleXnAddrHook);
 		LogToServer("HOOK ord73 XnAddr OK at 0x%08X", (DWORD)pAddr);
 	}
 
-	// XNetGetEthernetLinkStatus (ordinal 75)
 	pAddr = (DWORD*)ResolveFunction(hXam, 75);
 	if (pAddr) {
-		PatchInJump(pAddr, (DWORD)XNetGetEthernetLinkStatusHook, FALSE);
+		HookState_Init(&g_hookEthLink, pAddr, (DWORD)XNetGetEthernetLinkStatusHook);
 		LogToServer("HOOK ord75 EthLink OK at 0x%08X", (DWORD)pAddr);
 	}
 
-	// XamUserGetSigninState (ordinal 528)
 	pAddr = (DWORD*)ResolveFunction(hXam, 528);
 	if (pAddr) {
-		PatchInJump(pAddr, (DWORD)XamUserGetSigninStateHook, FALSE);
+		HookState_Init(&g_hookSigninState, pAddr, (DWORD)XamUserGetSigninStateHook);
 		LogToServer("HOOK ord528 SignIn OK at 0x%08X", (DWORD)pAddr);
 	}
 
-	// ---- Import table hooks (game imports only — privilege + enumerator) ----
+	// ---- Import table hooks (game imports only) ----
 
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 530, (DWORD)XamUserCheckPrivilegeHook);
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 590, (DWORD)XamCreateEnumeratorHandleHook);
