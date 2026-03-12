@@ -8,7 +8,7 @@ const char* PluginVersion = "1.0.0-DPLegacy";
 in_addr sunrise_ip = { 174, 136, 231, 17 };
 INT sunrise_port = 8000;
 
-in_addr jd_ip = { 192, 168, 50, 228 };
+in_addr jd_ip = { 192, 168, 50, 47 };
 INT jd_port = 19030;
 
 const char sunrise_description[XTITLE_SERVER_MAX_SERVER_INFO_LEN] = "required,mass_storage,other,ttl,usr,shr,web,dbg,upl,prs,std";
@@ -52,6 +52,13 @@ VOID Initialise()
 
 		if (TitleID != LastTitleId)
 		{
+			// If we were running a hooked title, tear down hooks before switching
+			BOOL wasJD = (LastTitleId & 0xFFFF0000) == 0x55530000;
+			BOOL wasHalo = (LastTitleId == Halo3 || LastTitleId == Halo3ExternalBeta || LastTitleId == Halo3InternalBeta);
+			if (wasJD || wasHalo) {
+				TeardownNetDllHooks();
+			}
+
 			LastTitleId = TitleID;
 
 			if (TitleID == Halo3 || TitleID == Halo3ExternalBeta || TitleID == Halo3InternalBeta)
@@ -86,6 +93,7 @@ BOOL APIENTRY DllMain(HANDLE hModule, DWORD ul_reason_for_call, LPVOID lpReserve
 	case DLL_PROCESS_DETACH:
 		bRunContinuous = FALSE;
 		while (!bLoopHasComplete) Sleep(100);
+		TeardownNetDllHooks();
 		break;
 	}
 	return TRUE;

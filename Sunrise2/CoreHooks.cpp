@@ -29,7 +29,7 @@ static const char* REDIRECT_DOMAINS[] = {
 static const int REDIRECT_DOMAIN_COUNT = sizeof(REDIRECT_DOMAINS) / sizeof(REDIRECT_DOMAINS[0]);
 
 // Local server IP as a string for XHttpConnect hostname replacement
-static const char* LOCAL_SERVER_IP = "192.168.50.228";
+static const char* LOCAL_SERVER_IP = "192.168.50.47";
 
 // ============================================================================
 // HOOK_STATE — unhook-call-rehook helpers
@@ -65,6 +65,15 @@ VOID HookState_Rehook(HOOK_STATE* hs)
 	PatchInJump(hs->pFunction, hs->hookTarget, FALSE);
 }
 
+// Permanently remove a hook (restore original bytes, mark as not installed)
+static VOID HookState_Remove(HOOK_STATE* hs)
+{
+	if (hs->installed) {
+		HookState_Unhook(hs);
+		hs->installed = FALSE;
+	}
+}
+
 // Hook states for all PatchInJump hooks
 static HOOK_STATE g_hookSocket       = {0};  // ordinal 3
 static HOOK_STATE g_hookConnect      = {0};  // ordinal 12
@@ -80,7 +89,8 @@ static HOOK_STATE g_hookSigninState  = {0};  // ordinal 528
 // ============================================================================
 // Side-channel UDP diagnostic logging
 // Sends log messages to the PC server on port 19031 (separate from game data).
-// Uses XNCALLER_SYSAPP so our own hooks (which filter XNCALLER_TITLE) skip it.
+// Uses XNCALLER_SYSAPP — TITLE sockets fail before game calls XNetStartup.
+// SYSAPP can create sockets but packets may not reach LAN (TBD).
 // ============================================================================
 
 static SOCKET g_logSocket = INVALID_SOCKET;
@@ -100,7 +110,7 @@ static void InitLogSocket()
 	g_logServerAddr.sin_addr.S_un.S_un_b.s_b1 = 192;
 	g_logServerAddr.sin_addr.S_un.S_un_b.s_b2 = 168;
 	g_logServerAddr.sin_addr.S_un.S_un_b.s_b3 = 50;
-	g_logServerAddr.sin_addr.S_un.S_un_b.s_b4 = 228;
+	g_logServerAddr.sin_addr.S_un.S_un_b.s_b4 = 47;
 	g_logInitialized = TRUE;
 }
 
@@ -137,6 +147,9 @@ static void LogPayloadToServer(const char* tag, const void* data, int dataLen)
 	NetDll_sendto(XNCALLER_SYSAPP, g_logSocket, buf, offset, 0,
 	              (VOID*)&g_logServerAddr, sizeof(g_logServerAddr));
 }
+
+// Forward declarations
+static void TestTCPConnectivity();
 
 // ============================================================================
 // Utility
@@ -318,6 +331,9 @@ HINTERNET NetDll_XHttpConnectHook(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR 
 	if (!bXHttpConnectHookFired) {
 		XNotify(L"[DIAG] XHttpConnect!");
 		bXHttpConnectHookFired = TRUE;
+
+		// Game networking is now initialized — run deferred TCP test
+		TestTCPConnectivity();
 	}
 
 	if (pszServerName != NULL) {
@@ -555,8 +571,89 @@ DWORD XamUserGetSigninStateHook(DWORD dwUserIndex)
 // Hook setup — installs all hooks
 // ============================================================================
 
+static BOOL g_hooksInstalled = FALSE;
+static BOOL g_tcpTestDone = FALSE;
+
+// TCP connectivity test — tries raw socket connection to the PC
+// Runs in its own thread to avoid blocking the XHttpConnect hook
+// (blocking connect can take 20-75s to timeout)
+static DWORD WINAPI TCPTestThread(LPVOID)
+{
+	SOCKADDR_IN addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(80);
+	addr.sin_addr.S_un.S_un_b.s_b1 = 192;
+	addr.sin_addr.S_un.S_un_b.s_b2 = 168;
+	addr.sin_addr.S_un.S_un_b.s_b3 = 50;
+	addr.sin_addr.S_un.S_un_b.s_b4 = 47;
+
+	// Try both caller types
+	XNCALLER_TYPE callers[2] = { XNCALLER_TITLE, XNCALLER_SYSAPP };
+
+	for (int c = 0; c < 2; c++) {
+		SOCKET s = NetDll_socket(callers[c], AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		if (s == INVALID_SOCKET) {
+			XNotify(c == 0 ? L"[TCP] TITLE sock fail" : L"[TCP] SYSAPP sock fail");
+			continue;
+		}
+
+		XNotify(c == 0 ? L"[TCP] TITLE connecting..." : L"[TCP] SYSAPP connecting...");
+
+		int result = NetDll_connect(callers[c], s, (sockaddr*)&addr, sizeof(addr));
+		if (result == 0) {
+			XNotify(c == 0 ? L"[TCP] TITLE connect OK!" : L"[TCP] SYSAPP connect OK!");
+
+			const char* httpReq = "GET / HTTP/1.0\r\nHost: 192.168.50.47\r\n\r\n";
+			NetDll_send(callers[c], s, httpReq, (int)strlen(httpReq), 0);
+
+			char respBuf[64];
+			memset(respBuf, 0, sizeof(respBuf));
+			int recvd = NetDll_recv(callers[c], s, respBuf, sizeof(respBuf) - 1, 0);
+			XNotify(recvd > 0 ? L"[TCP] HTTP recv OK!" : L"[TCP] HTTP recv fail");
+
+			NetDll_closesocket(callers[c], s);
+			return 0; // Success
+		} else {
+			int err = NetDll_WSAGetLastError();
+			// Format error code into toast
+			wchar_t errMsg[48];
+			int pos = 0;
+			const wchar_t* prefix = (c == 0) ? L"[TCP] TITLE err=" : L"[TCP] SYSAPP err=";
+			while (*prefix) errMsg[pos++] = *prefix++;
+			char digits[12]; int dpos = 0;
+			int val = err < 0 ? -err : err;
+			if (err < 0) errMsg[pos++] = L'-';
+			if (val == 0) { digits[dpos++] = '0'; }
+			else { while (val > 0) { digits[dpos++] = '0' + (val % 10); val /= 10; } }
+			for (int i = dpos - 1; i >= 0; i--) errMsg[pos++] = (wchar_t)digits[i];
+			errMsg[pos] = L'\0';
+			XNotify(errMsg);
+			NetDll_closesocket(callers[c], s);
+		}
+	}
+
+	XNotify(L"[TCP] Both FAIL");
+	return 0;
+}
+
+static void TestTCPConnectivity()
+{
+	if (g_tcpTestDone) return;
+	g_tcpTestDone = TRUE;
+
+	XNotify(L"[DIAG] TCP test...");
+	// Launch in a separate thread so we don't block the XHttp hook
+	ThreadMe((LPTHREAD_START_ROUTINE)TCPTestThread);
+}
+
 VOID SetupNetDllHooks()
 {
+	if (g_hooksInstalled) {
+		XNotify(L"[DIAG] Hooks already installed");
+		return;
+	}
+
 	XNotify(L"[DIAG] SetupHooks Entry");
 
 	HMODULE hXam = GetModuleHandle(MODULE_XAM);
@@ -632,6 +729,45 @@ VOID SetupNetDllHooks()
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 592, (DWORD)XamEnumerateHook);
 	LogToServer("HOOK imports (530,590,592) patched");
 
+	g_hooksInstalled = TRUE;
 	LogToServer("INIT SetupNetDllHooks complete - all hooks installed");
 	XNotify(L"[DIAG] All hooks done!");
+}
+
+// ============================================================================
+// Hook teardown — removes all PatchInJump hooks (called on game exit)
+// Import table hooks don't need removal — they die with the game module.
+// ============================================================================
+
+VOID TeardownNetDllHooks()
+{
+	if (!g_hooksInstalled) return;
+
+	HookState_Remove(&g_hookXHttpConnect);
+	HookState_Remove(&g_hookXHttpOpenReq);
+	HookState_Remove(&g_hookXHttpSendReq);
+	HookState_Remove(&g_hookXnAddr);
+	HookState_Remove(&g_hookEthLink);
+	HookState_Remove(&g_hookSigninState);
+
+	// Close diagnostic socket
+	if (g_logInitialized && g_logSocket != INVALID_SOCKET) {
+		NetDll_closesocket(XNCALLER_SYSAPP, g_logSocket);
+		g_logSocket = INVALID_SOCKET;
+		g_logInitialized = FALSE;
+	}
+
+	// Reset one-shot toast flags for next launch
+	bXHttpConnectHookFired = FALSE;
+	bXHttpOpenReqHookFired = FALSE;
+	bXHttpSendReqHookFired = FALSE;
+	bXnAddrHookFired = FALSE;
+	bEthLinkHookFired = FALSE;
+	bSigninHookFired = FALSE;
+	bPrivilegeHookFired = FALSE;
+	bEnumCreateHookFired = FALSE;
+	g_tcpTestDone = FALSE;
+
+	g_hooksInstalled = FALSE;
+	XNotify(L"[DIAG] Hooks removed");
 }
