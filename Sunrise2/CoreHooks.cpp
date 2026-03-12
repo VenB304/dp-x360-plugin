@@ -88,6 +88,8 @@ static HOOK_STATE g_hookSigninState  = {0};  // ordinal 528
 static HOOK_STATE g_hookLogonState   = {0};  // ordinal 322 (XNetLogonGetState)
 static HOOK_STATE g_hookLogonNat     = {0};  // ordinal 302 (XNetLogonGetNatType)
 static HOOK_STATE g_hookLogonStatus  = {0};  // ordinal 112 (XnpLogonGetStatus)
+static HOOK_STATE g_hookXNetConnect  = {0};  // ordinal 65 (XNetConnect)
+static HOOK_STATE g_hookXNetConnStat = {0};  // ordinal 66 (XNetGetConnectStatus)
 
 // ============================================================================
 // Side-channel UDP diagnostic logging
@@ -659,6 +661,40 @@ DWORD XnpLogonGetStatusHook(DWORD xnc)
 	return 0;
 }
 
+// --- NetDll_XNetConnect (ordinal 65) ---
+// Initiates an XNet secure connection (IPSec tunnel) to a peer/server.
+// The Quazal RendezVous SDK calls this in JobGetLSPTunnel::SecureConnect.
+// We return 0 (success) immediately — no real tunnel is needed since we
+// redirect traffic to a plain LAN server via NEUTERED mode.
+
+static BOOL bXNetConnectHookFired = FALSE;
+int XNetConnectHook(XNCALLER_TYPE xnc, const IN_ADDR ina)
+{
+	if (!bXNetConnectHookFired) {
+		XNotify(L"[DIAG] XNetConnect called!");
+		bXNetConnectHookFired = TRUE;
+	}
+	LogToServer("XNETCONNECT ip=%d.%d.%d.%d",
+		ina.S_un.S_un_b.s_b1, ina.S_un.S_un_b.s_b2,
+		ina.S_un.S_un_b.s_b3, ina.S_un.S_un_b.s_b4);
+	return 0; // Success — pretend tunnel is initiated
+}
+
+// --- NetDll_XNetGetConnectStatus (ordinal 66) ---
+// Polls XNet secure connection status. The Quazal SDK spins on this in
+// JobGetLSPTunnel::StepXNetGetConnectStatus until it returns CONNECTED.
+// XNET_CONNECT_STATUS values: 0=IDLE, 1=PENDING, 2=CONNECTED, 3=LOST
+
+static BOOL bXNetConnStatHookFired = FALSE;
+DWORD XNetGetConnectStatusHook(XNCALLER_TYPE xnc, const IN_ADDR ina)
+{
+	if (!bXNetConnStatHookFired) {
+		XNotify(L"[DIAG] XNetGetConnStat!");
+		bXNetConnStatHookFired = TRUE;
+	}
+	return 2; // XNET_CONNECT_STATUS_CONNECTED
+}
+
 // ============================================================================
 // Hook setup — installs all hooks
 // ============================================================================
@@ -890,6 +926,26 @@ VOID SetupNetDllHooks()
 		XNotify(L"[DIAG] ord112 resolve FAIL");
 	}
 
+	// ---- XNet connection hooks (spoof secure tunnel) ----
+
+	pAddr = (DWORD*)ResolveFunction(hXam, 65);
+	if (pAddr) {
+		HookState_Init(&g_hookXNetConnect, pAddr, (DWORD)XNetConnectHook);
+		LogToServer("HOOK ord65 XNetConnect OK at 0x%08X", (DWORD)pAddr);
+		XNotify(L"[DIAG] Hook ord65 OK");
+	} else {
+		XNotify(L"[DIAG] ord65 resolve FAIL");
+	}
+
+	pAddr = (DWORD*)ResolveFunction(hXam, 66);
+	if (pAddr) {
+		HookState_Init(&g_hookXNetConnStat, pAddr, (DWORD)XNetGetConnectStatusHook);
+		LogToServer("HOOK ord66 XNetGetConnStat OK at 0x%08X", (DWORD)pAddr);
+		XNotify(L"[DIAG] Hook ord66 OK");
+	} else {
+		XNotify(L"[DIAG] ord66 resolve FAIL");
+	}
+
 	// ---- Import table hooks (game imports only) ----
 
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 530, (DWORD)XamUserCheckPrivilegeHook);
@@ -920,6 +976,8 @@ VOID TeardownNetDllHooks()
 	HookState_Remove(&g_hookLogonState);
 	HookState_Remove(&g_hookLogonNat);
 	HookState_Remove(&g_hookLogonStatus);
+	HookState_Remove(&g_hookXNetConnect);
+	HookState_Remove(&g_hookXNetConnStat);
 
 	// Close diagnostic socket
 	if (g_logInitialized && g_logSocket != INVALID_SOCKET) {
@@ -940,6 +998,8 @@ VOID TeardownNetDllHooks()
 	bLogonStateHookFired = FALSE;
 	bLogonNatHookFired = FALSE;
 	bLogonStatusHookFired = FALSE;
+	bXNetConnectHookFired = FALSE;
+	bXNetConnStatHookFired = FALSE;
 	g_tcpTestDone = FALSE;
 
 	g_hooksInstalled = FALSE;
