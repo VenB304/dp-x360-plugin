@@ -340,21 +340,24 @@ HINTERNET NetDll_XHttpConnectHook(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR 
 		LogToServer("XHTTP_CONNECT host=%s port=%d flags=0x%08X", pszServerName, nServerPort, dwFlags);
 	}
 
+	// DNS-based redirect: let the hostname pass through unchanged.
+	// Our DNS server (on the PC) resolves Ubisoft domains -> local IP.
+	// We ONLY strip XHTTP_FLAG_SECURE and force port 80 so XHttp
+	// does plain HTTP to the DNS-resolved address (our PC).
+	DWORD  effectiveFlags = dwFlags;
+	INTERNET_PORT effectivePort = nServerPort;
+
 	if (pszServerName != NULL && ShouldRedirectDomain(pszServerName))
 	{
-		LogToServer("XHTTP_REDIRECT %s -> %s:80", pszServerName, LOCAL_SERVER_IP);
-		XNotify(L"HTTP Redirected!");
-
-		HookState_Unhook(&g_hookXHttpConnect);
-		HINTERNET result = ((pfnNetDll_XHttpConnect)(void*)g_hookXHttpConnect.pFunction)(
-			xnc, hSession, LOCAL_SERVER_IP, 80, dwFlags & ~XHTTP_FLAG_SECURE);
-		HookState_Rehook(&g_hookXHttpConnect);
-		return result;
+		effectiveFlags &= ~XHTTP_FLAG_SECURE;
+		effectivePort  = 80;
+		LogToServer("XHTTP_REDIRECT %s port=%d->80 noSSL (DNS)", pszServerName, nServerPort);
+		XNotify(L"HTTP Redirected (DNS)!");
 	}
 
 	HookState_Unhook(&g_hookXHttpConnect);
 	HINTERNET result = ((pfnNetDll_XHttpConnect)(void*)g_hookXHttpConnect.pFunction)(
-		xnc, hSession, pszServerName, nServerPort, dwFlags);
+		xnc, hSession, pszServerName, effectivePort, effectiveFlags);
 	HookState_Rehook(&g_hookXHttpConnect);
 	return result;
 }

@@ -1,7 +1,7 @@
 const dgram = require('dgram');
 const server = dgram.createSocket('udp4');
 
-const LOCAL_IP = '192.168.50.228';
+const LOCAL_IP = '192.168.50.47';
 const UPSTREAM_DNS = '8.8.8.8';
 const DNS_PORT = 53;
 
