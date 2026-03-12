@@ -85,6 +85,9 @@ static HOOK_STATE g_hookXHttpSendReq = {0};  // ordinal 209
 static HOOK_STATE g_hookXnAddr       = {0};  // ordinal 73
 static HOOK_STATE g_hookEthLink      = {0};  // ordinal 75
 static HOOK_STATE g_hookSigninState  = {0};  // ordinal 528
+static HOOK_STATE g_hookLogonState   = {0};  // ordinal 322 (XNetLogonGetState)
+static HOOK_STATE g_hookLogonNat     = {0};  // ordinal 302 (XNetLogonGetNatType)
+static HOOK_STATE g_hookLogonStatus  = {0};  // ordinal 112 (XnpLogonGetStatus)
 
 // ============================================================================
 // Side-channel UDP diagnostic logging
@@ -605,6 +608,58 @@ DWORD XamUserGetSigninStateHook(DWORD dwUserIndex)
 }
 
 // ============================================================================
+// Xbox Live Logon state hooks — spoof "online" for all callers
+//
+// These functions are called by the game BEFORE making any HTTP calls.
+// If they report "not connected", the game shows "connection error" and
+// never reaches the UbiServices HTTP layer.
+// Signatures are undocumented — on PPC, unused register params are harmless.
+// ============================================================================
+
+// --- XNetLogonGetState (ordinal 322) ---
+// Returns Xbox Live logon state. We return a value indicating "logged on".
+
+static BOOL bLogonStateHookFired = FALSE;
+DWORD XNetLogonGetStateHook()
+{
+	if (!bLogonStateHookFired) {
+		XNotify(L"[DIAG] LogonState called!");
+		bLogonStateHookFired = TRUE;
+	}
+	// Common XDK values: 0=offline, 1=connecting, 2=online
+	// Return "online" so game proceeds to HTTP calls
+	return 2;
+}
+
+// --- XNetLogonGetNatType (ordinal 302) ---
+// Returns NAT type. Games may refuse to go online with strict NAT.
+
+static BOOL bLogonNatHookFired = FALSE;
+DWORD XNetLogonGetNatTypeHook()
+{
+	if (!bLogonNatHookFired) {
+		XNotify(L"[DIAG] NatType called!");
+		bLogonNatHookFired = TRUE;
+	}
+	// XONLINE_NAT_OPEN = 1, MODERATE = 2, STRICT = 3
+	return 1; // Open NAT
+}
+
+// --- NetDll_XnpLogonGetStatus (ordinal 112) ---
+// Internal logon status. Returns 0 for success.
+
+static BOOL bLogonStatusHookFired = FALSE;
+DWORD XnpLogonGetStatusHook(DWORD xnc)
+{
+	if (!bLogonStatusHookFired) {
+		XNotify(L"[DIAG] LogonStatus called!");
+		bLogonStatusHookFired = TRUE;
+	}
+	// Return 0 (success/connected)
+	return 0;
+}
+
+// ============================================================================
 // Hook setup — installs all hooks
 // ============================================================================
 
@@ -806,6 +861,35 @@ VOID SetupNetDllHooks()
 		LogToServer("HOOK ord528 SignIn OK at 0x%08X", (DWORD)pAddr);
 	}
 
+	// ---- Xbox Live logon state hooks (spoof "online") ----
+
+	pAddr = (DWORD*)ResolveFunction(hXam, 322);
+	if (pAddr) {
+		HookState_Init(&g_hookLogonState, pAddr, (DWORD)XNetLogonGetStateHook);
+		LogToServer("HOOK ord322 LogonState OK at 0x%08X", (DWORD)pAddr);
+		XNotify(L"[DIAG] Hook ord322 OK");
+	} else {
+		XNotify(L"[DIAG] ord322 resolve FAIL");
+	}
+
+	pAddr = (DWORD*)ResolveFunction(hXam, 302);
+	if (pAddr) {
+		HookState_Init(&g_hookLogonNat, pAddr, (DWORD)XNetLogonGetNatTypeHook);
+		LogToServer("HOOK ord302 NatType OK at 0x%08X", (DWORD)pAddr);
+		XNotify(L"[DIAG] Hook ord302 OK");
+	} else {
+		XNotify(L"[DIAG] ord302 resolve FAIL");
+	}
+
+	pAddr = (DWORD*)ResolveFunction(hXam, 112);
+	if (pAddr) {
+		HookState_Init(&g_hookLogonStatus, pAddr, (DWORD)XnpLogonGetStatusHook);
+		LogToServer("HOOK ord112 LogonStatus OK at 0x%08X", (DWORD)pAddr);
+		XNotify(L"[DIAG] Hook ord112 OK");
+	} else {
+		XNotify(L"[DIAG] ord112 resolve FAIL");
+	}
+
 	// ---- Import table hooks (game imports only) ----
 
 	PatchModuleImport((PLDR_DATA_TABLE_ENTRY)*XexExecutableModuleHandle, "xam.xex", 530, (DWORD)XamUserCheckPrivilegeHook);
@@ -833,6 +917,9 @@ VOID TeardownNetDllHooks()
 	HookState_Remove(&g_hookXnAddr);
 	HookState_Remove(&g_hookEthLink);
 	HookState_Remove(&g_hookSigninState);
+	HookState_Remove(&g_hookLogonState);
+	HookState_Remove(&g_hookLogonNat);
+	HookState_Remove(&g_hookLogonStatus);
 
 	// Close diagnostic socket
 	if (g_logInitialized && g_logSocket != INVALID_SOCKET) {
@@ -850,6 +937,9 @@ VOID TeardownNetDllHooks()
 	bSigninHookFired = FALSE;
 	bPrivilegeHookFired = FALSE;
 	bEnumCreateHookFired = FALSE;
+	bLogonStateHookFired = FALSE;
+	bLogonNatHookFired = FALSE;
+	bLogonStatusHookFired = FALSE;
 	g_tcpTestDone = FALSE;
 
 	g_hooksInstalled = FALSE;
