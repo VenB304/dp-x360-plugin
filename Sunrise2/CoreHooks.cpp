@@ -155,6 +155,16 @@ static void TestTCPConnectivity();
 typedef int (*pfnNetDll_setsockopt)(XNCALLER_TYPE xnc, SOCKET s, int level, int optname, const char* optval, int optlen);
 static pfnNetDll_setsockopt g_pfnSetsockopt = NULL;
 
+// XNetSetOpt/XNetGetOpt resolved at runtime (ordinals 79/78)
+typedef int (*pfnNetDll_XNetSetOpt)(XNCALLER_TYPE xnc, DWORD dwOptId, BYTE* pbValue, DWORD dwValueSize);
+typedef int (*pfnNetDll_XNetGetOpt)(XNCALLER_TYPE xnc, DWORD dwOptId, BYTE* pbValue, DWORD* pdwValueSize);
+static pfnNetDll_XNetSetOpt g_pfnXNetSetOpt = NULL;
+static pfnNetDll_XNetGetOpt g_pfnXNetGetOpt = NULL;
+
+#ifndef XNET_OPTID_NEUTERED
+#define XNET_OPTID_NEUTERED 0x1389
+#endif
+
 // SO_MARKINSECURE / SO_GRANTINSECURE bypass XNet's security layer,
 // allowing plain TCP to reach standard (non-Xbox) servers on LAN.
 #ifndef SO_MARKINSECURE
@@ -211,40 +221,12 @@ void RegisterActiveServer(in_addr address, WORD port, const char description[XTI
 typedef SOCKET (*pfnNetDll_socket)(XNCALLER_TYPE xnc, int af, int type, int protocol);
 
 // --- NetDll_connect (ordinal 12) ---
-// Marks socket insecure ONLY when connecting to our server IP.
-// This is the targeted fix: game's normal XNet connections stay secure,
-// but connections to our server bypass XNet's security layer.
+// NOT HOOKED — unhook-call-rehook on connect() crashes the system
+// (same as socket/sendto/recvfrom — too frequently called by system services).
+// Instead, we use XNetSetOpt(NEUTERED) in XHttpSendRequest to make
+// XHttp's internal connections insecure.
 
 typedef int (*pfnNetDll_connect)(XNCALLER_TYPE xnc, SOCKET s, const sockaddr* name, int namelen);
-
-static BOOL bConnectHookFired = FALSE;
-
-int NetDll_connectPIJHook(XNCALLER_TYPE xnc, SOCKET s, const sockaddr* name, int namelen)
-{
-	if (xnc == XNCALLER_TITLE && name != NULL && namelen >= (int)sizeof(SOCKADDR_IN) && g_pfnSetsockopt) {
-		SOCKADDR_IN* addr = (SOCKADDR_IN*)name;
-		// Check if connecting to our server (192.168.50.47)
-		if (addr->sin_addr.S_un.S_un_b.s_b1 == 192 &&
-			addr->sin_addr.S_un.S_un_b.s_b2 == 168 &&
-			addr->sin_addr.S_un.S_un_b.s_b3 == 50 &&
-			addr->sin_addr.S_un.S_un_b.s_b4 == 47)
-		{
-			// Mark insecure BEFORE connecting — bypasses XNet security
-			BOOL val = TRUE;
-			g_pfnSetsockopt(xnc, s, SOL_SOCKET, SO_MARKINSECURE, (const char*)&val, sizeof(val));
-
-			if (!bConnectHookFired) {
-				XNotify(L"[DIAG] connect insecure!");
-				bConnectHookFired = TRUE;
-			}
-		}
-	}
-
-	HookState_Unhook(&g_hookConnect);
-	int result = ((pfnNetDll_connect)(void*)g_hookConnect.pFunction)(xnc, s, name, namelen);
-	HookState_Rehook(&g_hookConnect);
-	return result;
-}
 
 // --- NetDll_sendto (ordinal 24) ---
 //
@@ -419,11 +401,38 @@ DWORD NetDll_XHttpSendRequestHook(XNCALLER_TYPE xnc, HINTERNET hRequest,
 		LogToServer("XHTTP_HDRS %s", hdrBuf);
 	}
 
+	// Temporarily put XNet in "neutered" (insecure) mode while XHttp
+	// makes its internal connection.  This makes XHttp's internally-created
+	// sockets bypass XNet security, allowing plain TCP to our LAN server.
+	// We can't hook socket/connect directly (crashes the system), so this
+	// is the only way to make XHttp's connections insecure.
+	DWORD savedNeutered = 0;
+	DWORD savedSize = sizeof(savedNeutered);
+	BOOL didSetNeutered = FALSE;
+
+	if (g_pfnXNetSetOpt && g_pfnXNetGetOpt) {
+		// Save current value
+		g_pfnXNetGetOpt(xnc, XNET_OPTID_NEUTERED, (BYTE*)&savedNeutered, &savedSize);
+		// Enable neutered (insecure) mode
+		DWORD neutered = 1;
+		int setResult = g_pfnXNetSetOpt(xnc, XNET_OPTID_NEUTERED, (BYTE*)&neutered, sizeof(neutered));
+		if (setResult == 0) {
+			didSetNeutered = TRUE;
+			XNotify(L"[DIAG] XNet neutered ON");
+		}
+	}
+
 	HookState_Unhook(&g_hookXHttpSendReq);
 	DWORD result = ((pfnNetDll_XHttpSendRequest)(void*)g_hookXHttpSendReq.pFunction)(
 		xnc, hRequest, pwszHeaders, dwHeadersLength, lpOptional,
 		dwOptionalLength, dwTotalLength, dwContext);
 	HookState_Rehook(&g_hookXHttpSendReq);
+
+	// Restore original neutered state
+	if (didSetNeutered) {
+		g_pfnXNetSetOpt(xnc, XNET_OPTID_NEUTERED, (BYTE*)&savedNeutered, sizeof(savedNeutered));
+	}
+
 	return result;
 }
 
@@ -713,12 +722,15 @@ VOID SetupNetDllHooks()
 		}
 	}
 
-	// ---- Connect hook: marks sockets insecure for our server IP (ordinal 12) ----
-	pAddr = (DWORD*)ResolveFunction(hXam, 12);
-	if (pAddr && g_pfnSetsockopt) {
-		HookState_Init(&g_hookConnect, pAddr, (DWORD)NetDll_connectPIJHook);
-		LogToServer("HOOK ord12 connect+insecure OK at 0x%08X", (DWORD)pAddr);
-		XNotify(L"[DIAG] Hook ord12 (insec) OK");
+	// ---- Resolve XNetSetOpt/XNetGetOpt at runtime (ordinals 79/78) ----
+	if (!g_pfnXNetSetOpt) {
+		g_pfnXNetSetOpt = (pfnNetDll_XNetSetOpt)ResolveFunction(hXam, 79);
+		g_pfnXNetGetOpt = (pfnNetDll_XNetGetOpt)ResolveFunction(hXam, 78);
+		if (g_pfnXNetSetOpt && g_pfnXNetGetOpt) {
+			XNotify(L"[DIAG] XNetSetOpt resolved");
+		} else {
+			XNotify(L"[DIAG] XNetSetOpt FAIL");
+		}
 	}
 
 	// ---- PatchInJump hooks on XHttp functions (system-wide) ----
@@ -791,7 +803,6 @@ VOID TeardownNetDllHooks()
 {
 	if (!g_hooksInstalled) return;
 
-	HookState_Remove(&g_hookConnect);
 	HookState_Remove(&g_hookXHttpConnect);
 	HookState_Remove(&g_hookXHttpOpenReq);
 	HookState_Remove(&g_hookXHttpSendReq);
@@ -807,7 +818,6 @@ VOID TeardownNetDllHooks()
 	}
 
 	// Reset one-shot toast flags for next launch
-	bConnectHookFired = FALSE;
 	bXHttpConnectHookFired = FALSE;
 	bXHttpOpenReqHookFired = FALSE;
 	bXHttpSendReqHookFired = FALSE;
