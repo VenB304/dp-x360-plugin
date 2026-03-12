@@ -151,6 +151,19 @@ static void LogPayloadToServer(const char* tag, const void* data, int dataLen)
 // Forward declarations
 static void TestTCPConnectivity();
 
+// setsockopt resolved at runtime (ordinal 7, not in 21256 link library)
+typedef int (*pfnNetDll_setsockopt)(XNCALLER_TYPE xnc, SOCKET s, int level, int optname, const char* optval, int optlen);
+static pfnNetDll_setsockopt g_pfnSetsockopt = NULL;
+
+// SO_MARKINSECURE / SO_GRANTINSECURE bypass XNet's security layer,
+// allowing plain TCP to reach standard (non-Xbox) servers on LAN.
+#ifndef SO_MARKINSECURE
+#define SO_MARKINSECURE  0x5801
+#endif
+#ifndef SO_GRANTINSECURE
+#define SO_GRANTINSECURE 0x5803
+#endif
+
 // ============================================================================
 // Utility
 // ============================================================================
@@ -191,29 +204,16 @@ void RegisterActiveServer(in_addr address, WORD port, const char description[XTI
 // ============================================================================
 
 // --- NetDll_socket (ordinal 3) ---
+// NOT HOOKED — marking all TITLE sockets insecure broke XNet initialization.
+// Instead, we mark sockets insecure in the connect hook (ordinal 12) only
+// when the destination is our server IP.
 
 typedef SOCKET (*pfnNetDll_socket)(XNCALLER_TYPE xnc, int af, int type, int protocol);
 
-static BOOL bSocketHookFired = FALSE;
-
-SOCKET NetDll_socketPIJHook(XNCALLER_TYPE xnc, int af, int type, int protocol)
-{
-	HookState_Unhook(&g_hookSocket);
-	SOCKET result = ((pfnNetDll_socket)(void*)g_hookSocket.pFunction)(xnc, af, type, protocol);
-	HookState_Rehook(&g_hookSocket);
-
-	if (xnc == XNCALLER_TITLE) {
-		LogToServer("SOCKET af=%d type=%d proto=%d fd=%d", af, type, protocol, (int)result);
-		if (!bSocketHookFired) {
-			XNotify(L"[DIAG] socket() called!");
-			bSocketHookFired = TRUE;
-		}
-	}
-
-	return result;
-}
-
 // --- NetDll_connect (ordinal 12) ---
+// Marks socket insecure ONLY when connecting to our server IP.
+// This is the targeted fix: game's normal XNet connections stay secure,
+// but connections to our server bypass XNet's security layer.
 
 typedef int (*pfnNetDll_connect)(XNCALLER_TYPE xnc, SOCKET s, const sockaddr* name, int namelen);
 
@@ -221,22 +221,23 @@ static BOOL bConnectHookFired = FALSE;
 
 int NetDll_connectPIJHook(XNCALLER_TYPE xnc, SOCKET s, const sockaddr* name, int namelen)
 {
-	if (xnc == XNCALLER_TITLE && name != NULL && namelen >= (int)sizeof(SOCKADDR_IN)) {
+	if (xnc == XNCALLER_TITLE && name != NULL && namelen >= (int)sizeof(SOCKADDR_IN) && g_pfnSetsockopt) {
 		SOCKADDR_IN* addr = (SOCKADDR_IN*)name;
-		LogToServer("CONNECT fd=%d ip=%d.%d.%d.%d port=%d",
-			(int)s,
-			addr->sin_addr.S_un.S_un_b.s_b1,
-			addr->sin_addr.S_un.S_un_b.s_b2,
-			addr->sin_addr.S_un.S_un_b.s_b3,
-			addr->sin_addr.S_un.S_un_b.s_b4,
-			ntohs(addr->sin_port));
+		// Check if connecting to our server (192.168.50.47)
+		if (addr->sin_addr.S_un.S_un_b.s_b1 == 192 &&
+			addr->sin_addr.S_un.S_un_b.s_b2 == 168 &&
+			addr->sin_addr.S_un.S_un_b.s_b3 == 50 &&
+			addr->sin_addr.S_un.S_un_b.s_b4 == 47)
+		{
+			// Mark insecure BEFORE connecting — bypasses XNet security
+			BOOL val = TRUE;
+			g_pfnSetsockopt(xnc, s, SOL_SOCKET, SO_MARKINSECURE, (const char*)&val, sizeof(val));
 
-		if (!bConnectHookFired) {
-			XNotify(L"[DIAG] connect() called!");
-			bConnectHookFired = TRUE;
+			if (!bConnectHookFired) {
+				XNotify(L"[DIAG] connect insecure!");
+				bConnectHookFired = TRUE;
+			}
 		}
-
-		addr->sin_addr.S_un.S_addr = activeServer.inaServer.S_un.S_addr;
 	}
 
 	HookState_Unhook(&g_hookConnect);
@@ -340,24 +341,24 @@ HINTERNET NetDll_XHttpConnectHook(XNCALLER_TYPE xnc, HINTERNET hSession, LPCSTR 
 		LogToServer("XHTTP_CONNECT host=%s port=%d flags=0x%08X", pszServerName, nServerPort, dwFlags);
 	}
 
-	// DNS-based redirect: let the hostname pass through unchanged.
-	// Our DNS server (on the PC) resolves Ubisoft domains -> local IP.
-	// We ONLY strip XHTTP_FLAG_SECURE and force port 80 so XHttp
-	// does plain HTTP to the DNS-resolved address (our PC).
-	DWORD  effectiveFlags = dwFlags;
-	INTERNET_PORT effectivePort = nServerPort;
-
+	// Redirect Ubisoft domains to our local server IP.
+	// With the socket hook marking all TITLE sockets as insecure,
+	// XHttp's internal connection should reach the PC via plain TCP.
 	if (pszServerName != NULL && ShouldRedirectDomain(pszServerName))
 	{
-		effectiveFlags &= ~XHTTP_FLAG_SECURE;
-		effectivePort  = 80;
-		LogToServer("XHTTP_REDIRECT %s port=%d->80 noSSL (DNS)", pszServerName, nServerPort);
-		XNotify(L"HTTP Redirected (DNS)!");
+		LogToServer("XHTTP_REDIRECT %s -> %s:80", pszServerName, LOCAL_SERVER_IP);
+		XNotify(L"HTTP Redirected!");
+
+		HookState_Unhook(&g_hookXHttpConnect);
+		HINTERNET result = ((pfnNetDll_XHttpConnect)(void*)g_hookXHttpConnect.pFunction)(
+			xnc, hSession, LOCAL_SERVER_IP, 80, dwFlags & ~XHTTP_FLAG_SECURE);
+		HookState_Rehook(&g_hookXHttpConnect);
+		return result;
 	}
 
 	HookState_Unhook(&g_hookXHttpConnect);
 	HINTERNET result = ((pfnNetDll_XHttpConnect)(void*)g_hookXHttpConnect.pFunction)(
-		xnc, hSession, pszServerName, effectivePort, effectiveFlags);
+		xnc, hSession, pszServerName, nServerPort, dwFlags);
 	HookState_Rehook(&g_hookXHttpConnect);
 	return result;
 }
@@ -578,10 +579,16 @@ static BOOL g_hooksInstalled = FALSE;
 static BOOL g_tcpTestDone = FALSE;
 
 // TCP connectivity test — tries raw socket connection to the PC
+// Tests 4 combinations: {TITLE,SYSAPP} x {insecure, normal}
 // Runs in its own thread to avoid blocking the XHttpConnect hook
-// (blocking connect can take 20-75s to timeout)
 static DWORD WINAPI TCPTestThread(LPVOID)
 {
+	// Resolve setsockopt at runtime
+	if (!g_pfnSetsockopt) {
+		HMODULE hXam = GetModuleHandle(MODULE_XAM);
+		if (hXam) g_pfnSetsockopt = (pfnNetDll_setsockopt)ResolveFunction(hXam, 7);
+	}
+
 	SOCKADDR_IN addr;
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
@@ -591,52 +598,72 @@ static DWORD WINAPI TCPTestThread(LPVOID)
 	addr.sin_addr.S_un.S_un_b.s_b3 = 50;
 	addr.sin_addr.S_un.S_un_b.s_b4 = 47;
 
-	// Try both caller types
-	XNCALLER_TYPE callers[2] = { XNCALLER_TITLE, XNCALLER_SYSAPP };
+	// Test plan: try insecure socket first (most likely to work), then normal
+	struct { XNCALLER_TYPE xnc; BOOL insecure; const wchar_t* label; } tests[] = {
+		{ XNCALLER_TITLE,  TRUE,  L"TITLE+INSEC"  },
+		{ XNCALLER_SYSAPP, TRUE,  L"SYSAPP+INSEC" },
+		{ XNCALLER_TITLE,  FALSE, L"TITLE"        },
+		{ XNCALLER_SYSAPP, FALSE, L"SYSAPP"       },
+	};
 
-	for (int c = 0; c < 2; c++) {
-		SOCKET s = NetDll_socket(callers[c], AF_INET, SOCK_STREAM, IPPROTO_TCP);
-		if (s == INVALID_SOCKET) {
-			XNotify(c == 0 ? L"[TCP] TITLE sock fail" : L"[TCP] SYSAPP sock fail");
-			continue;
+	for (int t = 0; t < 4; t++) {
+		SOCKET s = NetDll_socket(tests[t].xnc, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		if (s == INVALID_SOCKET) continue;
+
+		// Try marking socket as insecure (bypass XNet security)
+		if (tests[t].insecure && g_pfnSetsockopt) {
+			BOOL val = TRUE;
+			g_pfnSetsockopt(tests[t].xnc, s, SOL_SOCKET, SO_MARKINSECURE, (const char*)&val, sizeof(val));
+			g_pfnSetsockopt(tests[t].xnc, s, SOL_SOCKET, SO_GRANTINSECURE, (const char*)&val, sizeof(val));
 		}
 
-		XNotify(c == 0 ? L"[TCP] TITLE connecting..." : L"[TCP] SYSAPP connecting...");
+		// Build toast: "[TCP] <label>..."
+		wchar_t msg[48]; int pos = 0;
+		const wchar_t* p = L"[TCP] "; while (*p) msg[pos++] = *p++;
+		p = tests[t].label; while (*p) msg[pos++] = *p++;
+		msg[pos++] = L'.'; msg[pos++] = L'.'; msg[pos++] = L'.'; msg[pos] = 0;
+		XNotify(msg);
 
-		int result = NetDll_connect(callers[c], s, (sockaddr*)&addr, sizeof(addr));
+		int result = NetDll_connect(tests[t].xnc, s, (sockaddr*)&addr, sizeof(addr));
 		if (result == 0) {
-			XNotify(c == 0 ? L"[TCP] TITLE connect OK!" : L"[TCP] SYSAPP connect OK!");
+			// Build success toast
+			pos = 0;
+			p = L"[TCP] "; while (*p) msg[pos++] = *p++;
+			p = tests[t].label; while (*p) msg[pos++] = *p++;
+			p = L" OK!"; while (*p) msg[pos++] = *p++;
+			msg[pos] = 0;
+			XNotify(msg);
 
 			const char* httpReq = "GET / HTTP/1.0\r\nHost: 192.168.50.47\r\n\r\n";
-			NetDll_send(callers[c], s, httpReq, (int)strlen(httpReq), 0);
+			NetDll_send(tests[t].xnc, s, httpReq, (int)strlen(httpReq), 0);
 
 			char respBuf[64];
 			memset(respBuf, 0, sizeof(respBuf));
-			int recvd = NetDll_recv(callers[c], s, respBuf, sizeof(respBuf) - 1, 0);
+			int recvd = NetDll_recv(tests[t].xnc, s, respBuf, sizeof(respBuf) - 1, 0);
 			XNotify(recvd > 0 ? L"[TCP] HTTP recv OK!" : L"[TCP] HTTP recv fail");
 
-			NetDll_closesocket(callers[c], s);
-			return 0; // Success
+			NetDll_closesocket(tests[t].xnc, s);
+			return 0; // Success — stop testing
 		} else {
 			int err = NetDll_WSAGetLastError();
-			// Format error code into toast
-			wchar_t errMsg[48];
-			int pos = 0;
-			const wchar_t* prefix = (c == 0) ? L"[TCP] TITLE err=" : L"[TCP] SYSAPP err=";
-			while (*prefix) errMsg[pos++] = *prefix++;
+			// Build error toast: "[TCP] <label> err=NNNNN"
+			pos = 0;
+			p = L"[TCP] "; while (*p) msg[pos++] = *p++;
+			p = tests[t].label; while (*p) msg[pos++] = *p++;
+			p = L" err="; while (*p) msg[pos++] = *p++;
 			char digits[12]; int dpos = 0;
 			int val = err < 0 ? -err : err;
-			if (err < 0) errMsg[pos++] = L'-';
+			if (err < 0) msg[pos++] = L'-';
 			if (val == 0) { digits[dpos++] = '0'; }
 			else { while (val > 0) { digits[dpos++] = '0' + (val % 10); val /= 10; } }
-			for (int i = dpos - 1; i >= 0; i--) errMsg[pos++] = (wchar_t)digits[i];
-			errMsg[pos] = L'\0';
-			XNotify(errMsg);
-			NetDll_closesocket(callers[c], s);
+			for (int i = dpos - 1; i >= 0; i--) msg[pos++] = (wchar_t)digits[i];
+			msg[pos] = 0;
+			XNotify(msg);
+			NetDll_closesocket(tests[t].xnc, s);
 		}
 	}
 
-	XNotify(L"[TCP] Both FAIL");
+	XNotify(L"[TCP] All 4 FAIL");
 	return 0;
 }
 
@@ -675,6 +702,24 @@ VOID SetupNetDllHooks()
 	}
 
 	DWORD* pAddr;
+
+	// ---- Resolve setsockopt at runtime (ordinal 7, not in 21256 link lib) ----
+	if (!g_pfnSetsockopt) {
+		g_pfnSetsockopt = (pfnNetDll_setsockopt)ResolveFunction(hXam, 7);
+		if (g_pfnSetsockopt) {
+			XNotify(L"[DIAG] setsockopt resolved");
+		} else {
+			XNotify(L"[DIAG] setsockopt FAIL");
+		}
+	}
+
+	// ---- Connect hook: marks sockets insecure for our server IP (ordinal 12) ----
+	pAddr = (DWORD*)ResolveFunction(hXam, 12);
+	if (pAddr && g_pfnSetsockopt) {
+		HookState_Init(&g_hookConnect, pAddr, (DWORD)NetDll_connectPIJHook);
+		LogToServer("HOOK ord12 connect+insecure OK at 0x%08X", (DWORD)pAddr);
+		XNotify(L"[DIAG] Hook ord12 (insec) OK");
+	}
 
 	// ---- PatchInJump hooks on XHttp functions (system-wide) ----
 
@@ -746,6 +791,7 @@ VOID TeardownNetDllHooks()
 {
 	if (!g_hooksInstalled) return;
 
+	HookState_Remove(&g_hookConnect);
 	HookState_Remove(&g_hookXHttpConnect);
 	HookState_Remove(&g_hookXHttpOpenReq);
 	HookState_Remove(&g_hookXHttpSendReq);
@@ -761,6 +807,7 @@ VOID TeardownNetDllHooks()
 	}
 
 	// Reset one-shot toast flags for next launch
+	bConnectHookFired = FALSE;
 	bXHttpConnectHookFired = FALSE;
 	bXHttpOpenReqHookFired = FALSE;
 	bXHttpSendReqHookFired = FALSE;
