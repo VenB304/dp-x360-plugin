@@ -1,4 +1,4 @@
-# Session Report — March 13, 2026 (Part 3)
+# Session Report — March 13, 2026
 
 ## dp-x360-plugin: Quazal RendezVous Investigation and XNet IPSec Spoofing
 
