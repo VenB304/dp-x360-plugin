@@ -44,10 +44,11 @@ Research and debugging logs:
 | Mar 13, 2026 | [Session 5](docs/SESSION_REPORT_2026-03-13_1.md) | Ghidra deep dive, logon hooks confirmed never-called, XEX patch plan |
 | Mar 13, 2026 | [Session 6](docs/SESSION_REPORT_2026-03-13_2.md) | piflc redirect confirmed, XEAS binary auth failure identified, vortex telemetry decoded |
 
-## Initial Research
+## Research
 
-- [Reviving Just Dance Xbox 360 Online](https://docs.google.com/document/d/1KkvpkaBPJHN8tHenfWjC79fzUM6fS2YWbM-ywYuH2-Q/edit?usp=sharing) — research document on re-enabling JD Xbox 360 online services
-- [Just Dance Revival Xbox 360 Guide](https://docs.google.com/document/d/1jkZiGtSYnkbbGTiEWv8sKwXOibZNWTdkLx3D-4Mvk7U/edit?usp=sharing) — guide covering the Xbox 360 revival setup and approach
+- [Reviving Just Dance Xbox 360 Online](https://docs.google.com/document/d/1KkvpkaBPJHN8tHenfWjC79fzUM6fS2YWbM-ywYuH2-Q/edit?usp=sharing) — Research document on re-enabling JD Xbox 360 online services
+- [Just Dance Revival Xbox 360 Guide](https://docs.google.com/document/d/1jkZiGtSYnkbbGTiEWv8sKwXOibZNWTdkLx3D-4Mvk7U/edit?usp=sharing) — Initial guide covering the Xbox 360 revival setup and approach
+- [Strategic Direction and Technical Roadmap](https://docs.google.com/document/d/1Un9SBWAvzRl1SEulom7gQhOb_lcgzF36dwlEwS6WA2s/edit?usp=drivesdk) — In-depth analysis of pre-connectivity blockers, SSL pinning bypasses, and the transition to a hybrid static/dynamic patching methodology.
 
 ## Credits
 
