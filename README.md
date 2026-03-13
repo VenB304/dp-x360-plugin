@@ -33,8 +33,6 @@ Output: `Sunrise2/Release/Sunrise2.xex`
 
 ## Session Reports
 
-Research and debugging logs:
-
 | Date | Report | Summary |
 |------|--------|---------|
 | Mar 11, 2026 | [Session 1](docs/SESSION_REPORT_2026-03-11_1.md) | Initial plugin setup, hook skeleton, network vector mapping |
