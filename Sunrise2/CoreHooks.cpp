@@ -25,6 +25,11 @@ static const char* REDIRECT_DOMAINS[] = {
 	"ncsa-storm.ubi.com",
 	"emea-storm.ubi.com",
 	"apac-storm.ubi.com",
+	// Xbox Live auth — XAM calls piflc to get XSTS tokens for titles
+	"piflc.xboxlive.com",
+	// Xbox Live token/auth services (appear in DNS during game auth)
+	"xeas.xboxlive.com",   // Xbox Entertainment Auth Service
+	"xetgs.xboxlive.com",  // Xbox Entertainment Token Generation Service (issues XSTS tokens for titles)
 };
 static const int REDIRECT_DOMAIN_COUNT = sizeof(REDIRECT_DOMAINS) / sizeof(REDIRECT_DOMAINS[0]);
 
@@ -411,6 +416,7 @@ typedef DWORD (*pfnNetDll_XHttpSendRequest)(XNCALLER_TYPE xnc, HINTERNET hReques
 	DWORD dwOptionalLength, DWORD dwTotalLength, DWORD_PTR dwContext);
 
 static BOOL bXHttpSendReqHookFired = FALSE;
+static BOOL bNeuteredToastShown = FALSE;
 DWORD NetDll_XHttpSendRequestHook(XNCALLER_TYPE xnc, HINTERNET hRequest,
 	LPCSTR pwszHeaders, DWORD dwHeadersLength, const VOID* lpOptional,
 	DWORD dwOptionalLength, DWORD dwTotalLength, DWORD_PTR dwContext)
@@ -447,7 +453,10 @@ DWORD NetDll_XHttpSendRequestHook(XNCALLER_TYPE xnc, HINTERNET hRequest,
 		int setResult = g_pfnXNetSetOpt(xnc, XNET_OPTID_NEUTERED, (BYTE*)&neutered, sizeof(neutered));
 		if (setResult == 0) {
 			didSetNeutered = TRUE;
-			XNotify(L"[DIAG] XNet neutered ON");
+			if (!bNeuteredToastShown) {
+				XNotify(L"[DIAG] XNet neutered ON");
+				bNeuteredToastShown = TRUE;
+			}
 		}
 	}
 
@@ -990,6 +999,7 @@ VOID TeardownNetDllHooks()
 	bXHttpConnectHookFired = FALSE;
 	bXHttpOpenReqHookFired = FALSE;
 	bXHttpSendReqHookFired = FALSE;
+	bNeuteredToastShown = FALSE;
 	bXnAddrHookFired = FALSE;
 	bEthLinkHookFired = FALSE;
 	bSigninHookFired = FALSE;

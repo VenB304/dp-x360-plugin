@@ -13,8 +13,10 @@ The plugin hooks Xbox network APIs at the XHttp layer to intercept outbound conn
 - XNet wraps all sockets in a security protocol by default — `SO_MARKINSECURE` / `XNET_OPTID_NEUTERED` bypasses this
 - PatchModuleImport hooks don't fire for game SDKs (internal wrappers); system-wide `PatchInJump` is required
 - XHttp-level hooks (ordinals 205, 207, 209) work; socket-level hooks freeze the system
-- Current blocker: JD2018 generates zero network traffic when navigating to WDF — an unknown gate prevents the UbiServices SDK from running entirely
-- Next step: XEX patch the URL template at `0x822998c8` to redirect UbiServices calls to local server
+- XEX patched: URL template at `0x822998c8` (`https://{env}public-ubiservices.ubi.com/{version}`) replaced with `http://192.168.50.47/{version}`; OpenParty xenon platform support added
+- piflc redirect confirmed working — `POST /vortex/logbinary.ashx` received with XON/2 telemetry body (`LogonFail_As`)
+- Current blocker: XEAS authentication fails (binary TCP protocol, not HTTP) — xam.xex never issues an XSTS token, so the UbiServices SDK never makes HTTP calls
+- Next step: hook `XUserGetTokenAndSignature` via `PatchModuleImport` to return a fake XSTS token, bypassing the entire XEAS/piflc chain
 
 ## Setup
 
@@ -40,6 +42,7 @@ Research and debugging logs:
 | Mar 12, 2026 | [Session 3](docs/SESSION_REPORT_2026-03-12_2.md) | XNet NEUTERED breakthrough, XHttp redirect confirmed, logon state investigation |
 | Mar 12, 2026 | [Session 4](docs/SESSION_REPORT_2026-03-12_3.md) | Quazal RendezVous analysis, XNet IPSec tunnel spoofing |
 | Mar 13, 2026 | [Session 5](docs/SESSION_REPORT_2026-03-13_1.md) | Ghidra deep dive, logon hooks confirmed never-called, XEX patch plan |
+| Mar 13, 2026 | [Session 6](docs/SESSION_REPORT_2026-03-13_2.md) | piflc redirect confirmed, XEAS binary auth failure identified, vortex telemetry decoded |
 
 ## Initial Research
 

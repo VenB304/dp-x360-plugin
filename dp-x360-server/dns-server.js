@@ -28,6 +28,11 @@ const REDIRECT_DOMAINS = [
   'prod-public-ubiservices.ubi.com',
   'msr-public-ubiservices.ubi.com',
   'msr-prod-public-ubiservices.ubi.com',
+  // Xbox Live auth — XAM calls piflc to get XSTS tokens for titles
+  'piflc.xboxlive.com',
+  // Xbox Live token/auth services (appear in DNS during game auth)
+  'xeas.xboxlive.com',   // Xbox Entertainment Auth Service
+  'xetgs.xboxlive.com',  // Xbox Entertainment Token Generation Service
 ];
 
 function parseDomainName(buf, offset) {
