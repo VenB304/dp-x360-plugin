@@ -2,7 +2,7 @@
 
 A Dashlaunch plugin for Xbox 360 that redirects Just Dance network traffic to a custom self-hosted server ([OpenParty](https://github.com/ibratabian17/OpenParty)).
 
-Targets soft-modded consoles running the [ABadAvatar/XeUnshackle](https://github.com/XeAssert/XeUnshackle) exploit.
+Targets soft-modded consoles running the [ABadAvatar](https://github.com/shutterbug2000/ABadAvatar) exploit.
 
 **Status: Active research — not functional yet.**
 
