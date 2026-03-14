@@ -44,9 +44,10 @@ Output: `Sunrise2/Release/Sunrise2.xex`
 
 ## Research
 
-- [Reviving Just Dance Xbox 360 Online](https://docs.google.com/document/d/1KkvpkaBPJHN8tHenfWjC79fzUM6fS2YWbM-ywYuH2-Q/edit?usp=sharing) — Research document on re-enabling JD Xbox 360 online services
-- [Just Dance Revival Xbox 360 Guide](https://docs.google.com/document/d/1jkZiGtSYnkbbGTiEWv8sKwXOibZNWTdkLx3D-4Mvk7U/edit?usp=sharing) — Initial guide covering the Xbox 360 revival setup and approach
-- [Strategic Direction and Technical Roadmap](https://docs.google.com/document/d/1Un9SBWAvzRl1SEulom7gQhOb_lcgzF36dwlEwS6WA2s/edit?usp=drivesdk) — In-depth analysis of pre-connectivity blockers, SSL pinning bypasses, and the transition to a hybrid static/dynamic patching methodology.
+- [Reviving Just Dance Xbox 360 Online](https://docs.google.com/document/d/1KkvpkaBPJHN8tHenfWjC79fzUM6fS2YWbM-ywYuH2-Q/edit?usp=sharing) — Research document on re-enabling JD Xbox 360 online services.
+- [Just Dance Revival Xbox 360 Guide](https://docs.google.com/document/d/1jkZiGtSYnkbbGTiEWv8sKwXOibZNWTdkLx3D-4Mvk7U/edit?usp=sharing) — Initial guide covering the Xbox 360 revival setup and approach.
+- [Strategic Direction and Technical Roadmap](https://docs.google.com/document/d/13UYCpqp_l8LW2EzlyIFTJLAgJXOemeToXmLCDC20AVo/edit?usp=sharing) — In-depth analysis of pre-connectivity blockers, SSL pinning bypasses, and the transition to a hybrid static/dynamic patching methodology.
+- [Analyzing Legacy Game Server Emulation Projects](https://docs.google.com/document/d/1B0965vM0cvA4eHzAjHKfo7SuWKyoce2Vh0_fc7CMhrs/edit?usp=sharing) — A comprehensive technical analysis comparing the Xbox 360 ecosystem with analogous projects like Halo 3 Sunrise and Insignia. This document details advanced preservation strategies including hypervisor exploitation, cryptographic gateway spoofing, and the emulation of proprietary middleware like Quazal RendezVous.
 
 ## Credits
 
