@@ -35,12 +35,12 @@ Output: `Sunrise2/Release/Sunrise2.xex`
 
 | Date | Report | Summary |
 |------|--------|---------|
-| Mar 11, 2026 | [Session 1](docs/SESSION_REPORT_2026-03-11_1.md) | Initial plugin setup, hook skeleton, network vector mapping |
-| Mar 12, 2026 | [Session 2](docs/SESSION_REPORT_2026-03-12_1.md) | Debugging Phase 1, DanceParty dev intel, XNet security layer discovery |
-| Mar 12, 2026 | [Session 3](docs/SESSION_REPORT_2026-03-12_2.md) | XNet NEUTERED breakthrough, XHttp redirect confirmed, logon state investigation |
-| Mar 12, 2026 | [Session 4](docs/SESSION_REPORT_2026-03-12_3.md) | Quazal RendezVous analysis, XNet IPSec tunnel spoofing |
-| Mar 13, 2026 | [Session 5](docs/SESSION_REPORT_2026-03-13_1.md) | Ghidra deep dive, logon hooks confirmed never-called, XEX patch plan |
-| Mar 13, 2026 | [Session 6](docs/SESSION_REPORT_2026-03-13_2.md) | piflc redirect confirmed, XEAS binary auth failure identified, vortex telemetry decoded |
+| Mar 11, 2026 | [Session 1](docs/session_report/SESSION_REPORT_2026-03-11_1.md) | Initial plugin setup, hook skeleton, network vector mapping |
+| Mar 12, 2026 | [Session 2](docs/session_report/SESSION_REPORT_2026-03-12_1.md) | Debugging Phase 1, DanceParty dev intel, XNet security layer discovery |
+| Mar 12, 2026 | [Session 3](docs/session_report/SESSION_REPORT_2026-03-12_2.md) | XNet NEUTERED breakthrough, XHttp redirect confirmed, logon state investigation |
+| Mar 12, 2026 | [Session 4](docs/session_report/SESSION_REPORT_2026-03-12_3.md) | Quazal RendezVous analysis, XNet IPSec tunnel spoofing |
+| Mar 13, 2026 | [Session 5](docs/session_report/SESSION_REPORT_2026-03-13_1.md) | Ghidra deep dive, logon hooks confirmed never-called, XEX patch plan |
+| Mar 13, 2026 | [Session 6](docs/session_report/SESSION_REPORT_2026-03-13_2.md) | piflc redirect confirmed, XEAS binary auth failure identified, vortex telemetry decoded |
 
 ## Research
 
